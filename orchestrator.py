@@ -14,7 +14,7 @@ Usage:
   python3 orchestrator.py phase4 "matrix text" "task core summary"
 """
 
-import asyncio, sys, time, json, logging
+import asyncio, sys, time, json, logging, os
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +32,15 @@ from adapters import (
 SHARED_CDP_PORT = "9222"
 P2_DEFAULT_TIMEOUT = 60
 
+# ── CDP Security (P0 fix 2026-06-28) ───────────────────────────────────────
+_CDP_TOKEN = os.environ.get("CHROME_CDP_TOKEN", "")
+
+
+def _cdp_url(port: str = "9222") -> str:
+    """Build CDP endpoint URL. Appends ?token= if CHROME_CDP_TOKEN is set."""
+    base = f"http://127.0.0.1:{port}"
+    return f"{base}?token={_CDP_TOKEN}" if _CDP_TOKEN else base
+
 P2_CLASSES = {
     "chatgpt": ChatGPTAdapter,
     "claude":  ClaudeAdapter,
@@ -40,30 +49,48 @@ P2_CLASSES = {
 }
 
 
-# ── Barrier (inline, no main.py dependency) ──────────────────────────────────
+# ── Barrier (asyncio.Condition — atomic, abort-safe) ────────────────────────
 
 class Barrier:
+    """Thread-safe asyncio barrier with timeout and abort.
+    Uses asyncio.Condition for atomic state transitions — no count+=1 races.
+    Supports abort() to force-release all waiters on worker failure."""
     def __init__(self, n, timeout=30):
         self.n = n
         self.timeout = timeout
-        self.count = 0
-        self.event = asyncio.Event()
-        self._abort = False
-    async def wait(self):
-        self.count += 1
-        if self.count >= self.n:
-            self.event.set()
-        try:
-            await asyncio.wait_for(self.event.wait(), timeout=self.timeout)
-            return not self._abort
-        except asyncio.TimeoutError:
-            self._abort = True
-            self.event.set()  # release all other waiters
-            return False  # timeout occurred
+        self._count = 0
+        self._aborted = False
+        self._released = False
+        self._cond = asyncio.Condition()
+
+    async def wait(self) -> bool:
+        """Wait for all N parties or timeout. Returns True if normal release,
+        False if timeout or aborted."""
+        async with self._cond:
+            self._count += 1
+            if self._count >= self.n:
+                self._released = True
+                self._cond.notify_all()
+
+            try:
+                await asyncio.wait_for(
+                    self._cond.wait_for(lambda: self._released or self._aborted),
+                    timeout=self.timeout,
+                )
+                return not self._aborted
+            except asyncio.TimeoutError:
+                pass
+
+            # Timeout: abort and release all remaining waiters
+            if not self._released and not self._aborted:
+                self._aborted = True
+                self._cond.notify_all()
+            return False
+
     def abort(self):
-        """Force-release all waiters (call on worker failure)."""
-        self._abort = True
-        self.event.set()
+        """Force-release all waiters. Safe to call from any context."""
+        self._aborted = True
+        self._released = True
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -161,7 +188,7 @@ async def phase2_dispatch(prompts: dict, timeout_s: int = P2_DEFAULT_TIMEOUT) ->
     log.info(f"🟡 Phase 2: Dispatch — {len(prompts)} platforms")
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{SHARED_CDP_PORT}")
+        browser = await pw.chromium.connect_over_cdp(_cdp_url(SHARED_CDP_PORT))
         context = browser.contexts[0]
         await context.grant_permissions(["clipboard-read", "clipboard-write"])
 
@@ -220,7 +247,7 @@ async def phase4_adjudicate(matrix: str, task_core: str) -> str:
     gm = GeminiAdapter()
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{SHARED_CDP_PORT}")
+        browser = await pw.chromium.connect_over_cdp(_cdp_url(SHARED_CDP_PORT))
         context = browser.contexts[0]
         page = await gm.connect(context=context)
 

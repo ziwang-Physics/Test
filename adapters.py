@@ -16,9 +16,20 @@ Maturity levels:
   ⭐⭐       = Placeholder selectors, needs discovery
 """
 
-import asyncio, time, logging
+import asyncio, time, logging, os
 
 log = logging.getLogger("adapters")
+
+# ── CDP Security (P0 fix 2026-06-28) ───────────────────────────────────────
+# Chrome --remote-debugging-token provides bearer-token auth on CDP port.
+# If CHROME_CDP_TOKEN is set, it MUST be passed to connect_over_cdp.
+_CDP_TOKEN = os.environ.get("CHROME_CDP_TOKEN", "")
+
+
+def _cdp_url(port: str = "9222") -> str:
+    """Build CDP endpoint URL. Appends ?token= if CHROME_CDP_TOKEN is set."""
+    base = f"http://127.0.0.1:{port}"
+    return f"{base}?token={_CDP_TOKEN}" if _CDP_TOKEN else base
 
 
 # ── Base Adapter ────────────────────────────────────────────────────────────
@@ -77,7 +88,7 @@ class BaseAdapter:
             raise ValueError("connect() requires either pw= or context=")
 
         self._owns_context = True
-        browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{self.cdp_port}")
+        browser = await pw.chromium.connect_over_cdp(_cdp_url(self.cdp_port))
         self._browser = browser
         self._context = await browser.new_context(
             viewport={"width": 1280, "height": 800}
@@ -263,13 +274,14 @@ class BaseAdapter:
 
         for i, sel in enumerate(strategies):
             try:
-                text = await page.evaluate(f"""() => {{
-                    const els = document.querySelectorAll('{sel}');
+                # P0 security: selector passed as parameter, not string-interpolated
+                text = await page.evaluate("""(sel) => {
+                    const els = document.querySelectorAll(sel);
                     if (els.length === 0) return '';
                     // Get the LAST matching element (latest response)
                     const el = els[els.length - 1];
                     return (el.innerText || el.textContent || '').trim();
-                }}""")
+                }""", sel)
                 if text and len(text) > 20:
                     log.info(f"[{self.name}] Strategy #{i+1} '{sel[:50]}' → {len(text)} chars")
                     return text

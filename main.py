@@ -47,19 +47,31 @@ MAX_RESPONSE_DISPLAY = 8000  # chars per response in text mode
 # Shared Chrome port — all platforms use the same browser for login sharing
 SHARED_CDP_PORT = "9222"
 
+# ── CDP Security (P0 fix 2026-06-28) ───────────────────────────────────────
+_CDP_TOKEN = os.environ.get("CHROME_CDP_TOKEN", "")
+
+
+def _cdp_url(port: str = "9222") -> str:
+    base = f"http://127.0.0.1:{port}"
+    return f"{base}?token={_CDP_TOKEN}" if _CDP_TOKEN else base
+
 
 class Barrier:
-    """Simple asyncio Barrier for Python < 3.11 compatibility."""
+    """Thread-safe asyncio Barrier using asyncio.Condition (Python < 3.11 compat).
+    Fixed: count+=1 is now atomic under Condition lock."""
     def __init__(self, n):
         self.n = n
-        self.count = 0
-        self.event = asyncio.Event()
+        self._count = 0
+        self._released = False
+        self._cond = asyncio.Condition()
 
     async def wait(self):
-        self.count += 1
-        if self.count >= self.n:
-            self.event.set()
-        await self.event.wait()
+        async with self._cond:
+            self._count += 1
+            if self._count >= self.n:
+                self._released = True
+                self._cond.notify_all()
+            await self._cond.wait_for(lambda: self._released)
 
 
 async def worker(adapter, prompt, barrier, results, timeout_s, shared_context):
@@ -188,7 +200,7 @@ async def main():
     # Create ONE shared browser context: all platforms open as TABS
     # in the existing Chrome window (CDP port 9222), not separate windows.
     async with async_playwright() as pw:
-        browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{SHARED_CDP_PORT}")
+        browser = await pw.chromium.connect_over_cdp(_cdp_url(SHARED_CDP_PORT))
         # Use the default context (= existing Chrome window with Gemini tab)
         shared_context = browser.contexts[0]
         await shared_context.grant_permissions(["clipboard-read", "clipboard-write"])
