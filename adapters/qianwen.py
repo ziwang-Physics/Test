@@ -51,46 +51,13 @@ class QianwenAdapter(BaseAdapter):
         '[class*="think-loader"], [class*="generating"]'
     )
 
-    # ── Deep Thinking toggle ──────────────────────────────────────────────
+    # ── Deep Thinking toggle (DISABLED by user request) ──────────────────
 
     async def ensure_thinking_mode(self, page) -> bool:
-        """Enable 思考 (Deep Thinking) mode via aria-pressed toggle.
+        """No-op — user prefers Qianwen without Deep Thinking for speed.
 
-        Idempotent — skips if aria-pressed is already \"true\".
-        Uses the FIRST visible button (there may be desktop + mobile
-        duplicates in the DOM).
-
-        Returns True on success, False if any step fails (non-fatal for P2).
+        The aria-pressed toggle is deliberately NOT clicked.  Raw Qwen3.7-Max
+        responses are faster and still high quality for the security/defense
+        lens this worker provides.
         """
-        try:
-            # Find the visible "思考" button. Use .first since there are
-            # duplicate buttons in the sidebar + main area.
-            btn = page.locator(THINK_BTN_SELECTOR).first
-            await btn.wait_for(state="visible", timeout=5000)
-
-            # Idempotent guard — aria-pressed="true" means already active
-            pressed = await btn.get_attribute("aria-pressed")
-            if pressed == "true":
-                log.info("[Qianwen] Deep Thinking already active (aria-pressed guard)")
-                return True
-
-            # Click to enable
-            log.info("[Qianwen] Enabling Deep Thinking (aria-pressed=%s)", pressed)
-            await btn.click()
-            await asyncio.sleep(THINK_TOGGLE_WAIT_S)
-
-            # Verify
-            pressed = await btn.get_attribute("aria-pressed")
-            if pressed == "true":
-                log.info("[Qianwen] Deep Thinking activated ✓")
-                return True
-            else:
-                log.warning("[Qianwen] Deep Thinking may not be active (aria-pressed=%s)",
-                            pressed)
-                # Optimistic: the click likely worked even if aria-pressed
-                # hasn't updated yet (React batching)
-                return True
-
-        except Exception as e:
-            log.warning("[Qianwen] Deep Thinking toggle failed: %s", e)
-            return False
+        return True

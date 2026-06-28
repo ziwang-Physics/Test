@@ -55,8 +55,6 @@ DEEPSEEK_TIMEOUT_S = 120  # API HTTP timeout (not reasoning timeout)
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 # URL prefix → platform name mapping for tab reuse.
-# When a loop re-runs, we scan existing tabs; if a tab's URL starts with
-# one of these prefixes, we reuse it instead of opening a new one.
 _TAB_URL_MAP = {
     "chatgpt": "https://chatgpt.com",
     "qianwen": "https://tongyi.aliyun.com",
@@ -64,17 +62,41 @@ _TAB_URL_MAP = {
     "gemini":  "https://gemini.google.com",
 }
 
+# Session rotation: after N reuses, close the tab and open a fresh one
+# to prevent context-window bloat and keep responses sharp.
+MAX_TAB_REUSE = 3
+_tab_use_count: dict[str, int] = {}  # platform → consecutive reuses
+
+
+def _should_rotate(platform: str) -> bool:
+    """Return True if the tab for *platform* has exceeded MAX_TAB_REUSE."""
+    return _tab_use_count.get(platform, 0) >= MAX_TAB_REUSE
+
+
+def _record_use(platform: str) -> None:
+    """Increment the reuse counter for *platform*."""
+    _tab_use_count[platform] = _tab_use_count.get(platform, 0) + 1
+
+
+def _reset_rotation(platform: str) -> None:
+    """Reset the reuse counter (called after a fresh tab is opened)."""
+    _tab_use_count[platform] = 0
+
 
 def _find_existing_tab(context, platform: str):
-    """Scan open pages in *context* for one whose URL matches *platform*.
+    """Scan open pages for one whose URL matches *platform*.
 
-    Returns the first matching LIVE Page or None.  Checks ``page.is_closed()``
-    and catches TargetClosedError — a tab that existed last round may have been
-    closed by the website (anti-bot, session timeout, redirect).
+    Returns the first matching LIVE Page, or None if no match OR if the tab
+    has been reused >= MAX_TAB_REUSE times (session rotation to prevent
+    context-window bloat).
 
-    The caller skips ``connect()`` and ``ensure_fresh_conversation()`` when
-    reusing a live page.
+    Caller MUST call _record_use() after successful extraction on a reused
+    tab, and _reset_rotation() when a fresh tab is opened.
     """
+    # Rotation: force fresh tab every MAX_TAB_REUSE rounds
+    if _should_rotate(platform):
+        return None
+
     prefix = _TAB_URL_MAP.get(platform)
     if not prefix:
         return None
@@ -83,13 +105,6 @@ def _find_existing_tab(context, platform: str):
             if page.is_closed():
                 continue
             if page.url.startswith(prefix):
-                # Double-check: try a cheap JS eval to confirm page is responsive
-                try:
-                    # Use a synchronous-style check via evaluate — if the page
-                    # was closed between is_closed() and now, this throws.
-                    pass  # url access already proved liveness
-                except Exception:
-                    continue
                 return page
         except Exception:
             continue
@@ -144,30 +159,46 @@ async def _p2_worker(adapter, prompt: str, results: dict,
         if existing_page is not None:
             # ── Tab Reuse path: same conversation, just add a new message ──
             page = existing_page
-            # Guard: if the page died between rounds, fall back to fresh tab
-            try:
-                if page.is_closed():
-                    log.warning("[P2:%s] Reused tab was closed — falling back to fresh", name)
-                    page = await adapter.connect(context=context)
-                    reopened = True
-                    await adapter.ensure_fresh_conversation(page)
-                else:
-                    log.info("[P2:%s] ♻ Reusing existing tab (url: %s)", name,
-                             page.url[:80] if page.url else "?")
-                    try:
-                        await page.mouse.click(400, 400)
-                    except Exception:
-                        pass
-                    await page.wait_for_timeout(1000)
-            except Exception as e:
-                log.warning("[P2:%s] Reused tab check failed: %s — fresh tab", name, e)
+            # Rotation: close old tab if it's been reused too many times
+            if _should_rotate(name):
+                log.info("[P2:%s] 🔄 Rotation — closing stale tab after %d reuses",
+                         name, _tab_use_count.get(name, 0))
                 try: await page.close()
                 except: pass
                 page = await adapter.connect(context=context)
                 reopened = True
+                _reset_rotation(name)
                 await adapter.ensure_fresh_conversation(page)
+            # Guard: if the page died between rounds, fall back to fresh tab
+            elif page.is_closed():
+                try:
+                    if page.is_closed():
+                        log.warning("[P2:%s] Reused tab was closed — falling back to fresh", name)
+                        page = await adapter.connect(context=context)
+                        reopened = True
+                        _reset_rotation(name)
+                        await adapter.ensure_fresh_conversation(page)
+                except Exception as e:
+                    log.warning("[P2:%s] Reused tab check failed: %s — fresh tab", name, e)
+                    try: await page.close()
+                    except: pass
+                    page = await adapter.connect(context=context)
+                    reopened = True
+                    _reset_rotation(name)
+                    await adapter.ensure_fresh_conversation(page)
+            else:
+                log.info("[P2:%s] ♻ Reusing tab #%d (url: %s)", name,
+                         _tab_use_count.get(name, 0) + 1,
+                         page.url[:80] if page.url else "?")
+                try:
+                    await page.mouse.click(400, 400)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1000)
+                _record_use(name)
         else:
-            # ── Fresh tab path (first run or tab was closed) ──
+            # ── Fresh tab path (first run or rotation triggered) ──
+            _reset_rotation(name)
             page = await adapter.connect(context=context)
             reopened = True
 
@@ -298,16 +329,29 @@ async def phase2_dispatch(prompts: dict,
 
         results: dict = {}
 
-        # ── Tab Reuse (2026-06-29): scan existing tabs before opening new ones ──
-        # First run: all _find_existing_tab() return None → fresh tabs created.
-        # Subsequent loop iterations: find the SAME tab by URL → inject into it,
-        # keeping conversation history intact.  No tab explosion.
+        # ── Tab Reuse with Session Rotation (2026-06-29) ──
+        # First run: all fresh tabs.  Subsequent iterations: reuse SAME tab.
+        # After MAX_TAB_REUSE reuses: close stale tab, open fresh one.
         existing_pages = {}
         for adapter, prompt, name in selected:
+            if _should_rotate(name):
+                # Close the stale tab so _find_existing_tab won't find it
+                stale = _find_existing_tab(context, name)
+                if stale:
+                    try:
+                        await stale.close()
+                        log.info("[P2] 🔄 %s — closed stale tab (%d reuses)",
+                                 name, _tab_use_count.get(name, 0))
+                    except Exception:
+                        pass
+                _reset_rotation(name)
+                continue  # will create fresh tab below
+
             found = _find_existing_tab(context, name)
             if found:
                 existing_pages[name] = found
-                log.info("[P2] ♻ %s tab found — will reuse", name)
+                log.info("[P2] ♻ %s tab found (use #%d) — will reuse",
+                         name, _tab_use_count.get(name, 0) + 1)
 
         # All tabs in one browser window (shared context).
         # Stagger task creation by 1.5s to avoid triggering anti-bot detection
@@ -322,10 +366,12 @@ async def phase2_dispatch(prompts: dict,
                           existing_page=existing_pages.get(name))
             )
 
-        # Wait for all to complete (or timeout)
+        # Wait for ALL workers to finish — no artificial deadline.
+        # Per-worker timeouts handle stuck tabs; outer wait blocks until
+        # every AI has completed generation (toolbar or stability confirmed).
         done, pending = await asyncio.wait(
             tasks.values(),
-            timeout=timeout_s + 30,  # global deadline: worker timeout + buffer
+            timeout=None,  # wait indefinitely — all AIs must finish
             return_when=asyncio.ALL_COMPLETED,
         )
 
