@@ -9,7 +9,7 @@ from .base import BaseAdapter
 
 
 class ClaudeAdapter(BaseAdapter):
-    name = "Claude"
+    name = "claude"
     EDITOR_SELECTOR = (
         'div.ProseMirror, [contenteditable="true"], textarea, [role="textbox"]'
     )
@@ -24,10 +24,11 @@ class ClaudeAdapter(BaseAdapter):
         '[class*="assistant"]',
         'article:last-of-type',
     ]
+    # P0 fix (iteration-3 ChatGPT): removed product names ("Cowork", "Claude Code",
+    # "Microsoft Office") from error patterns — they appear in legitimate responses
+    # about the multiagent skill itself.  Keep only real rate-limit/free-tier banners.
     ERROR_PATTERNS = [
-        "Cancel anytime",
-        "Plus, get more ways to use Claude",
-        "Cowork",
-        "Claude Code",
-        "Microsoft Office",
+        "You are out of free messages",
+        "Upgrade to keep chatting",
+        "limits will reset",
     ]

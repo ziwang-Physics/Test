@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """ChatGPT adapter — OpenAI ChatGPT (⭐⭐⭐⭐ Tested).
 
-Proven DOM selectors for prompt-textarea, send-button, and assistant messages.
+Q2 AI feedback (2026-06-29): data-testid attributes are OpenAI's most stable
+anchors — they survive React re-renders and A/B tests.  CSS classes like
+'markdown' and 'prose' are secondary fallbacks.
 """
 
 from .base import BaseAdapter
 
 
 class ChatGPTAdapter(BaseAdapter):
-    name = "ChatGPT"
+    name = "chatgpt"
     EDITOR_SELECTOR = (
         '#prompt-textarea, div[contenteditable="true"], [data-id="root"]'
     )
@@ -19,13 +21,15 @@ class ChatGPTAdapter(BaseAdapter):
     )
     URL = "https://chatgpt.com/"
     RESPONSE_STRATEGIES = [
-        # P1 fix (2026-06-29): updated selectors for current ChatGPT DOM.
-        # The old '[data-message-author-role="assistant"]' no longer matches.
-        'article[data-testid*="conversation-turn"]:last-of-type [class*="markdown"]',
+        # Q2: data-testid anchors first (most stable across DOM changes)
+        '[data-testid*="conversation-turn"]:last-of-type [data-message-author-role="assistant"]',
+        '[data-message-author-role="assistant"]:last-of-type [class*="markdown"]',
         '[data-testid*="conversation-turn"]:last-of-type',
-        'article[data-testid*="turn"]:last-of-type',
-        '[data-message-author-role="assistant"]',  # legacy — may return
+        # Fallback: article-based selectors
+        'article[data-testid*="turn"]:last-of-type [class*="markdown"]',
         'article:last-of-type [class*="markdown"]',
+        # Legacy (may return after OpenAI DOM rollback)
+        '[data-message-author-role="assistant"]',
         '.message-group:last-child .content',
         '[class*="assistant"] [class*="prose"]',
     ]

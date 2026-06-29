@@ -57,8 +57,13 @@ async def worker(adapter, prompt: str, barrier, results: dict,
         await adapter.ensure_fresh_conversation(page)
 
         # Platform-specific init
+        # P0 fix (iteration-7): GeminiAdapter.ensure_pro_extended() replaced by
+        # ensure_thinking_mode() returning ModeResult
         if isinstance(adapter, GeminiAdapter):
-            await adapter.ensure_pro_extended(page)
+            mode_result = await adapter.ensure_thinking_mode(page)
+            if not mode_result:
+                log.error("[%s] Thinking mode FAILED: %s", name,
+                         getattr(mode_result, 'reason', 'unknown'))
         if isinstance(adapter, DeepSeekAdapter):
             await adapter.ensure_expert_mode(page)
             await adapter.ensure_deep_think(page)
@@ -82,7 +87,11 @@ async def worker(adapter, prompt: str, barrier, results: dict,
         raw_response = await adapter.wait_response(
             page, timeout_ms=timeout_s * 1000
         )
+        # P0 fix (iteration-7 P0-2): detect silent truncation from adapter
+        was_truncated = getattr(adapter, '_last_was_truncated', False)
         cleaned = adapter.clean_response(raw_response, prompt)
+        if was_truncated and cleaned:
+            cleaned = f"[WARNING: TRUNCATED — {timeout_s}s timeout]\n\n{cleaned}"
 
         is_valid, reason = adapter.validate_response(cleaned, prompt)
         p2_ok = BaseAdapter.is_pipeline_usable(is_valid, reason, len(cleaned))
@@ -95,6 +104,7 @@ async def worker(adapter, prompt: str, barrier, results: dict,
             "length": len(cleaned),
             "raw_length": len(raw_response),
             "quality": reason,
+            "truncated": was_truncated,
         }
         if p2_ok:
             log.info("[%s] Complete — %d chars ✅", name, len(cleaned))
@@ -132,10 +142,12 @@ async def main():
         "--adapters", type=str,
         default="gemini,chatgpt,claude,kimi,qianwen,deepseek",
     )
-    parser.add_argument("--no-barrier", action="store_true")
+    parser.add_argument("--no-send-barrier", action="store_true",
+                       help="Skip simultaneous-send barrier (workers still run concurrently)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--maturity", action="store_true")
-    parser.add_argument("--synthesize", action="store_true")
+    parser.add_argument("--synthesize", action="store_true",
+                       help="(DEPRECATED — synthesis not yet integrated; use orchestrator)")
     args = parser.parse_args()
 
     if args.maturity:
@@ -155,17 +167,27 @@ async def main():
             sys.exit(1)
 
     adapter_names = [a.strip().lower() for a in args.adapters.split(",")]
+
+    # P0 fix (iteration-7 P0-4): reject duplicate adapters — they silently
+    # overwrite each other in results[name], producing incorrect counts.
+    from collections import Counter
+    dupes = [n for n, c in Counter(adapter_names).items() if c > 1]
+    if dupes:
+        log.error("Duplicate adapters not allowed: %s", ', '.join(dupes))
+        sys.exit(2)
+
     selected = []
     for name in adapter_names:
         if name in ADAPTER_REGISTRY:
             selected.append(ADAPTER_REGISTRY[name](cdp_port=SHARED_CDP_PORT))
         else:
-            log.warning("Unknown adapter: %s (available: %s)",
-                        name, ",".join(ADAPTER_REGISTRY.keys()))
+            log.error("Unknown adapter: %s (available: %s)",
+                      name, ",".join(ADAPTER_REGISTRY.keys()))
+            sys.exit(2)
 
     if not selected:
         log.error("No valid adapters selected")
-        sys.exit(1)
+        sys.exit(2)
 
     log.info("MultiAgent: %d platforms | prompt=%d chars", len(selected), len(prompt))
     log.info("Barrier: %s",
@@ -181,7 +203,7 @@ async def main():
         log.info("Shared context: %d context(s), %d existing page(s)",
                  len(browser.contexts), len(shared_context.pages))
 
-        barrier = None if args.no_barrier else AbortableBarrier(
+        barrier = None if args.no_send_barrier else AbortableBarrier(
             len(selected), timeout=60
         )
         results = {}
@@ -253,6 +275,13 @@ async def main():
         status = (f"✅ {r.get('length', 0)} chars" if r.get("success")
                   else f"❌ {r.get('error', 'unknown')[:60]}")
         log.info("  %-10s %s", adp.name, status)
+
+    # P0 fix (iteration-7 P0-3): non-zero exit when no platform succeeded.
+    # Previously CLI returned 0 even when ALL platforms failed, which made
+    # automated callers treat total failure as success.
+    if successes == 0:
+        log.error("All %d platform(s) failed — exiting with code 3", len(selected))
+        sys.exit(3)
 
     return results
 

@@ -22,7 +22,7 @@ THINK_TOGGLE_WAIT_S  = 2.0              # post-click React state settle time
 
 
 class QianwenAdapter(BaseAdapter):
-    name = "Qianwen"
+    name = "qianwen"
     EDITOR_SELECTOR = (
         'textarea, div[contenteditable="true"], [role="textbox"], '
         '.input-box, .chat-input-area'
@@ -39,16 +39,19 @@ class QianwenAdapter(BaseAdapter):
     )
     URL = "https://www.qianwen.com/?source=tongyigw"
     RESPONSE_STRATEGIES = [
+        # Q2 AI feedback: prefer semantic anchors over CSS classes
+        '[class*="bot"] [class*="answer"]:last-of-type',
+        '[class*="message"][class*="bot"]:last-of-type',
         '[class*="message"]:last-of-type',
+        '[class*="chat-message"]:last-child [class*="content"]',
+        '[class*="answer-content"]',
         '[class*="message"]',
-        '[class*="bot"] [class*="answer"]',
         '[class*="chat-message"]:last-child',
     ]
-    # During Deep Thinking / normal generation, the stop button is visible.
-    # If it's still there, the answer hasn't finished rendering.
     THINKING_SELECTOR = (
         'button[aria-label*="停止"], .stop-btn, '
-        '[class*="think-loader"], [class*="generating"]'
+        '[class*="think-loader"], [class*="generating"], '
+        '[class*="deep-thinking"]'
     )
 
     # ── Deep Thinking toggle (DISABLED by user request) ──────────────────

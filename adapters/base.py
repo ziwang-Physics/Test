@@ -18,6 +18,11 @@ from common import (
 log = logging.getLogger("adapters.base")
 
 
+class PromptInjectionError(RuntimeError):
+    """Raised when prompt text fails to land in the editor (P0: fail-closed)."""
+    pass
+
+
 # ── P1: Safe Page lifecycle (RAII, prevents CDP leaks) ───────────────────
 
 @asynccontextmanager
@@ -90,16 +95,11 @@ class BaseAdapter:
             self._owns_context = False
             self._context = context
             page = await context.new_page()
-            await page.goto(self.URL, wait_until="domcontentloaded",
-                            timeout=PAGE_GOTO_TIMEOUT_MS)
-            await page.wait_for_timeout(PAGE_LOAD_WAIT_MS)
-            try:
-                await page.mouse.click(400, 400)
-            except Exception:
-                pass
-            await page.wait_for_timeout(SPA_WAKE_WAIT_MS)
+            # Don't navigate here — ensure_fresh_conversation() handles initial
+            # navigation.  Double page.goto() was wasting ~10s per tab and
+            # could trigger "Target has been closed" on concurrent tabs.
             self._page = page
-            log.info("[%s] Connected (shared tab) — %s", self.name, await page.title())
+            log.info("[%s] Connected (shared tab) — new page created", self.name)
             return page
 
         if pw is None:
@@ -147,6 +147,60 @@ class BaseAdapter:
 
     # ── Page readiness ─────────────────────────────────────────────────────
 
+    # ── Health Probe (P0: ChatGPT robustness review 2026-06-30) ──────────────
+
+    async def probe(self, page) -> dict:
+        """Quick health check before injecting full prompt.
+
+        Returns dict with keys: url_ok, editor_visible, can_type, can_clear,
+        error (str or None).  Called by orchestrator before expensive operations.
+        """
+        result = {"url_ok": False, "editor_visible": False,
+                  "can_type": False, "can_clear": False, "error": None}
+        try:
+            # 1. URL check
+            current = page.url
+            result["url_ok"] = current.startswith(self.URL) and "about:blank" not in current
+            if not result["url_ok"]:
+                result["error"] = f"URL mismatch: {current[:80]}"
+                return result
+
+            # 2. Editor check
+            editor = page.locator(self.EDITOR_SELECTOR).first
+            try:
+                await editor.wait_for(state="visible", timeout=5_000)
+                result["editor_visible"] = True
+            except Exception:
+                result["error"] = "Editor not visible"
+                return result
+
+            # 3. Can-type round-trip test
+            canary = "__hb_probe__"
+            await editor.focus()
+            await page.keyboard.insert_text(canary)
+            await asyncio.sleep(0.3)
+            content = await editor.evaluate(
+                "el => (el.textContent || el.value || el.innerText || '')"
+            )
+            result["can_type"] = canary in content
+
+            # 4. Clear test
+            await editor.fill("")
+            await asyncio.sleep(0.2)
+            cleared = await editor.evaluate(
+                "el => (el.textContent || el.value || el.innerText || '').trim()"
+            )
+            result["can_clear"] = len(cleared) == 0
+
+            if not result["can_type"] or not result["can_clear"]:
+                result["error"] = (
+                    f"Editor round-trip failed: type={result['can_type']}, "
+                    f"clear={result['can_clear']}"
+                )
+        except Exception as e:
+            result["error"] = str(e)[:200]
+        return result
+
     async def ensure_ready(self, page) -> None:
         """Wait for input editor to be visible and focused."""
         try:
@@ -156,9 +210,16 @@ class BaseAdapter:
             await editor.click()
             log.info("[%s] Editor ready", self.name)
         except Exception as e:
-            log.warning("[%s] Editor wait failed: %s — retrying via reload", self.name, e)
-            await page.goto(page.url, wait_until="domcontentloaded",
-                            timeout=PAGE_GOTO_TIMEOUT_MS)
+            log.warning("[%s] Editor wait failed: %s — retrying", self.name, e)
+            # P0 fix (2026-06-30): NEVER goto(page.url) blindly — if the page
+            # is about:blank, navigating to about:blank succeeds but stays blank.
+            # Instead: reload if on target URL, else navigate to target.
+            if page.url.startswith(self.URL):
+                await page.reload(wait_until="domcontentloaded",
+                                  timeout=PAGE_GOTO_TIMEOUT_MS)
+            else:
+                await page.goto(self.URL, wait_until="domcontentloaded",
+                                timeout=PAGE_GOTO_TIMEOUT_MS)
             await page.wait_for_timeout(5000)
             editor = page.locator(self.EDITOR_SELECTOR).first
             await editor.wait_for(state="visible", timeout=EDITOR_READY_TIMEOUT_MS)
@@ -204,75 +265,188 @@ class BaseAdapter:
         await page.wait_for_timeout(100)
 
     async def inject_prompt(self, page, text: str) -> None:
-        """Type text via keyboard (triggers framework events naturally).
+        """Type text into the chat editor.
 
-        For prompts > INSERT_TEXT_LIMIT chars, falls back to clipboard paste
-        because Playwright's keyboard.insert_text() has a platform-dependent
-        buffer limit.
+        P0 fix (iteration-3 ChatGPT P0-02): uses locator.fill() as primary
+        method (supports input/textarea/[contenteditable], triggers input events).
+        Falls back to keyboard.insert_text() for short prompts.  CLIPBOARD PASTE
+        IS DISABLED — navigator.clipboard.writeText() may fail silently on
+        shared contexts without clipboard permissions, and the subsequent
+        Ctrl+V would paste whatever was already in the user's OS clipboard.
         """
-        if len(text) > INSERT_TEXT_LIMIT:
-            log.info("[%s] Large prompt (%d chars), using clipboard paste",
-                     self.name, len(text))
-            try:
-                await page.evaluate("(t) => navigator.clipboard.writeText(t)", text)
-            except Exception:
-                log.warning("[%s] Clipboard write failed", self.name)
-            await page.keyboard.press("ControlOrMeta+v")
-            await page.wait_for_timeout(500)
-        else:
-            await page.keyboard.insert_text(text)
+        editor = page.locator(self.EDITOR_SELECTOR).first
 
-        await page.wait_for_timeout(300)
-
-        # Integrity check — skip for very short prompts (<50 chars) where a
-        # single-char delta would trip the threshold.  Use 10% tolerance
-        # because editors normalize whitespace/unicode differently, and
-        # Chinese text can lose 5-8% from line-break normalization alone.
-        if len(text) >= 50:
-            editor = page.locator(self.EDITOR_SELECTOR).first
-            injected = await editor.evaluate(
-                "el => (el.textContent || el.innerText || '').trim().length"
-            )
-            delta_pct = abs(injected - len(text)) / max(len(text), 1)
-            if delta_pct > 0.10:
-                log.warning("[%s] Payload mismatch: expected ~%d, got %d (%.1f%%)",
-                            self.name, len(text), injected, delta_pct * 100)
-                # P1: warn but proceed — partial injection > complete failure.
-                # The editor may have normalized whitespace; the LLM usually
-                # still receives the full semantic content.
-                if delta_pct > 0.30:
-                    raise RuntimeError(
-                        f"Input payload severely truncated ({injected} vs {len(text)})"
-                    )
-
-        # Belt-and-suspenders: type char + delete to wake framework
+        # Method 1: locator.fill() — Playwright-recommended, works on
+        # <input>, <textarea>, and [contenteditable]. Fires input events.
         try:
-            await page.keyboard.type(",")
-            await page.keyboard.press("Backspace")
-            await page.wait_for_timeout(200)
-        except Exception:
-            pass
+            await editor.fill(text)
+            log.info("[%s] Prompt injected via fill() (%d chars)", self.name, len(text))
+            await page.wait_for_timeout(300)
+            return
+        except Exception as e:
+            log.debug("[%s] fill() failed: %s — trying insert_text", self.name, e)
+
+        # Method 2: keyboard.insert_text() for shorter prompts
+        if len(text) <= INSERT_TEXT_LIMIT:
+            await editor.focus()
+            await page.keyboard.insert_text(text)
+            log.info("[%s] Prompt injected via insert_text (%d chars)", self.name, len(text))
+            await page.wait_for_timeout(300)
+            return
+
+        # Method 3: DOM injection as last resort (for large prompts on
+        # rich-text editors that reject fill()).  Directly sets textContent
+        # on the editor element's locator, NOT via document.querySelector.
+        try:
+            await editor.evaluate("(el, t) => el.textContent = t", text)
+            log.info("[%s] Prompt injected via DOM el.textContent (%d chars)",
+                     self.name, len(text))
+            await page.wait_for_timeout(300)
+        except Exception as e:
+            log.error("[%s] ALL injection methods failed: %s", self.name, e)
+            raise PromptInjectionError(
+                f"Failed to inject prompt ({len(text)} chars): {e}"
+            ) from e
+
+        # Integrity check using content fingerprint (hash), not length diff
+        if len(text) >= 50:
+            try:
+                actual = await editor.evaluate(
+                    "el => (el.textContent || el.innerText || '').trim()"
+                )
+                import hashlib, unicodedata
+                norm_expected = unicodedata.normalize("NFC", text).replace("\r\n", "\n").strip()
+                norm_actual = unicodedata.normalize("NFC", actual).replace("\r\n", "\n").strip()
+                if hashlib.blake2s(norm_actual.encode()).digest() != \
+                   hashlib.blake2s(norm_expected.encode()).digest():
+                    log.warning("[%s] Content fingerprint mismatch — may be truncated",
+                               self.name)
+                    # Still proceed if length is reasonable (>70% of expected)
+                    if len(norm_actual) < len(norm_expected) * 0.7:
+                        raise RuntimeError(
+                            f"Payload severely truncated: {len(norm_actual)} vs {len(norm_expected)}"
+                        )
+            except RuntimeError:
+                raise
+            except Exception:
+                pass  # integrity check is best-effort
 
         log.info("[%s] Prompt injected (%d chars)", self.name, len(text))
 
     async def trigger_send(self, page) -> None:
-        """Click send button or press Enter."""
+        """Submit prompt — one method only, verify state change.
+
+        P1 fix (iteration-3 ChatGPT P1-01): old code tried Enter → click →
+        Ctrl+Enter in sequence.  If click() actually succeeded but then
+        navigated or detached, the exception catch would proceed to Enter
+        fallback — causing double-send.  Now: try click first (it has
+        Playwright actionability checks), then Enter, then stop.
+        """
+        # Record pre-send state to verify submission actually happened
+        try:
+            pre_user_count = await page.evaluate("""() => {
+                return document.querySelectorAll(
+                    '[data-message-author-role="user"]'
+                ).length;
+            }""")
+        except Exception:
+            pre_user_count = -1
+
+        sent = False
+
+        # Method 1: Button click — Playwright checks visible/stable/enabled
         try:
             send_btn = page.locator(self.SEND_SELECTOR).first
-            await send_btn.wait_for(state="visible", timeout=5000)
-            if await send_btn.is_enabled():
-                await send_btn.click()
-                log.info("[%s] Sent via button click", self.name)
-                return
+            await send_btn.click(timeout=5000)
+            log.info("[%s] Sent via button click", self.name)
+            sent = True
         except Exception:
             pass
-        await page.keyboard.press("Enter")
-        log.info("[%s] Sent via Enter", self.name)
+
+        # Method 2: Enter key — only if click didn't send
+        if not sent:
+            try:
+                editor = page.locator(self.EDITOR_SELECTOR).first
+                await editor.focus()
+                await editor.press("Enter")
+                log.info("[%s] Sent via Enter key", self.name)
+                sent = True
+            except Exception:
+                pass
+
+        if not sent:
+            log.error("[%s] ALL send methods failed", self.name)
+            raise RuntimeError(f"[{self.name}] Failed to send prompt")
+
+        # Verify state change: either a new user message appeared or
+        # editor was cleared (confirms submission was consumed)
+        await asyncio.sleep(1.5)
+        try:
+            post_user_count = await page.evaluate("""() => {
+                return document.querySelectorAll(
+                    '[data-message-author-role="user"]'
+                ).length;
+            }""")
+            if pre_user_count >= 0 and post_user_count > pre_user_count:
+                log.info("[%s] Send confirmed: user messages %d→%d",
+                         self.name, pre_user_count, post_user_count)
+            else:
+                # Check if editor was cleared as alternative confirmation
+                editor = page.locator(self.EDITOR_SELECTOR).first
+                content = await editor.evaluate(
+                    "el => (el.textContent || el.innerText || '').trim()"
+                )
+                if len(content) < 10:
+                    log.info("[%s] Send confirmed: editor cleared", self.name)
+                else:
+                    log.warning("[%s] Send may NOT have succeeded — editor still has %d chars",
+                               self.name, len(content))
+        except Exception:
+            pass  # verification is best-effort
+
+    # ── Baseline tracking (P0 fix 2026-06-29: multi-AI 3-way diagnostic) ──
+    # Root cause of 6-round Gemini PROMPT_ECHO_DOMINANT: in reused tabs,
+    # `els[els.length - 1]` picks the user's OWN just-injected message
+    # (it's the newest element), not the yet-to-be-generated assistant reply.
+    # Fix: record assistant-turn count BEFORE send, only extract index >= baseline.
+
+    async def _record_assistant_baseline(self, page) -> int:
+        """Count existing assistant-turn elements BEFORE sending the prompt.
+
+        Called by orchestrator._p2_worker right before trigger_send().
+        After generation, wait_response() only looks at elements with
+        index >= baseline — skipping the user message and old history.
+        """
+        try:
+            count = await page.evaluate("""(strategies) => {
+                let maxCount = 0;
+                for (const sel of strategies) {
+                    const els = document.querySelectorAll(sel);
+                    if (els.length > maxCount) maxCount = els.length;
+                }
+                return maxCount;
+            }""", self.RESPONSE_STRATEGIES)
+            log.info("[%s] Baseline: %d assistant turns in DOM", self.name, count)
+            return count
+        except Exception:
+            return 0
 
     # ── Response pipeline ──────────────────────────────────────────────────
 
     async def wait_response(self, page, timeout_ms: int = 300_000) -> str:
-        """Wait for generation complete, then extract response."""
+        """Wait for generation complete, then extract response.
+
+        P0 fix (iteration-6 P0-03): sets self._last_was_truncated when timeout
+        occurs so callers can propagate the truncation marker to users.  The old
+        code returned partial text without indicating truncation — users saw
+        incomplete answers thinking they were complete.
+
+        Q1-Q2 AI feedback (2026-06-29): MutationObserver + content-fingerprint.
+        - Baseline recorded before submit (via _record_baseline) to only extract NEW content
+        - MutationObserver injected to detect DOM changes without polling
+        - Falls back to 500ms poll if MutationObserver unavailable
+        """
+        self._last_was_truncated = False
         start = time.time()
 
         # Phase 1: stop button appear → disappear = generation window
@@ -282,53 +456,100 @@ class BaseAdapter:
             log.info("[%s] Generation started", self.name)
             remaining = max(10_000, timeout_ms - int((time.time() - start) * 1000))
             await stop_btn.wait_for(state="hidden", timeout=remaining)
-            log.info("[%s] Generation finished", self.name)
+            log.info("[%s] Stop button hidden", self.name)
         except Exception:
-            log.info("[%s] No prolonged generation phase", self.name)
+            log.info("[%s] No stop-button phase", self.name)
 
-        # Phase 2: toolbar = completion anchor
-        # P1 fix (2026-06-29): Cap toolbar wait at TOOLBAR_WAIT_CAP_MS (15s).
-        # Before this fix, `remaining` could be 500s+ for platforms whose
-        # TOOLBAR_SELECTOR never matches (e.g. Qianwen lacks .copy-btn),
-        # deadlocking the worker until the outer asyncio.wait() timeout.
-        # A toolbar either renders quickly after generation or never will.
-        TOOLBAR_WAIT_CAP_MS = 10_000  # 10s enough — toolbar renders fast or never
+        # Phase 2: MutationObserver + single-evaluate extraction.
+        # P0 fix (iteration-9): disconnect old observer before installing new.
+        # Old code never disconnected on the success return path — each round
+        # accumulated a new observer on the DOM, causing CPU/memory leak across
+        # tab reuses.  Now wrapped in try/finally for guaranteed cleanup.
         try:
-            toolbar = page.locator(self.TOOLBAR_SELECTOR).first
-            await toolbar.wait_for(state="visible", timeout=TOOLBAR_WAIT_CAP_MS)
-            log.info("[%s] Response toolbar detected", self.name)
+            await page.evaluate("""() => {
+                window.__agentchat_observer?.disconnect();
+                window.__agentchat_observer = null;
+                window.__agentchat_mutations = 0;
+                window.__agentchat_observer = new MutationObserver(() => {
+                    window.__agentchat_mutations++;
+                });
+                window.__agentchat_observer.observe(document.body, {
+                    childList: true, subtree: true, characterData: true
+                });
+            }""")
         except Exception:
-            log.info("[%s] Toolbar not detected (%.1fs cap), stability fallback",
-                     self.name, TOOLBAR_WAIT_CAP_MS / 1000)
-            last_len = 0
-            last_change = time.time()
-            while (time.time() - last_change) < RESPONSE_STABILITY_S:
-                if (time.time() - start) * 1000 > timeout_ms:
+            pass  # observer is best-effort
+
+        CONTENT_STABILITY_S = 1.5
+        last_len = 0
+        stable_since = time.time()
+
+        # P0 fix (iteration-9): wrap polling in try/finally so MutationObserver
+        # is disconnected on ALL exit paths (success return, timeout, exception).
+        # Old code only cleaned up on timeout/exception — the normal return path
+        # left the observer active, accumulating across tab reuses.
+        try:
+            while True:
+                elapsed_ms = int((time.time() - start) * 1000)
+                if elapsed_ms > timeout_ms:
+                    log.warning("[%s] Timeout after %.0fs — extracting partial", self.name, timeout_ms / 1000)
+                    self._last_was_truncated = True
                     break
+
+                # Check thinking indicator
+                if self.THINKING_SELECTOR:
+                    try:
+                        if await page.locator(self.THINKING_SELECTOR).first.is_visible():
+                            stable_since = time.time()
+                            await page.wait_for_timeout(500)
+                            continue
+                    except Exception:
+                        pass
+
+                # Baseline-aware extraction
                 try:
-                    await page.wait_for_timeout(STABILITY_POLL_MS)
+                    baseline = getattr(self, '_assistant_baseline', 0)
+                    result = await page.evaluate("""([strategies, baseline]) => {
+                        const mutations = window.__agentchat_mutations || 0;
+                        window.__agentchat_mutations = 0;
+                        let text = '';
+                        for (const sel of strategies) {
+                            const els = document.querySelectorAll(sel);
+                            for (let i = els.length - 1; i >= baseline; i--) {
+                                const t = (els[i].textContent || '').trim();
+                                if (t.length > 20) { text = t; break; }
+                            }
+                            if (text) break;
+                        }
+                        return {mutations, text, len: text.length};
+                    }""", [self.RESPONSE_STRATEGIES, baseline])
+                except Exception:
+                    await page.wait_for_timeout(500)
+                    continue
 
-                    # ── Fix 2026-06-28: check thinking indicator before extracting ──
-                    # If the platform still shows a "thinking/loading/spinner" element,
-                    # reset the stability timer — the real answer hasn't started yet.
-                    # This prevents extracting search queries or intermediate thinking
-                    # text as the final response (Kimi/Qianwen session bleed).
-                    if self.THINKING_SELECTOR:
-                        try:
-                            thinking_el = page.locator(self.THINKING_SELECTOR).first
-                            if await thinking_el.is_visible():
-                                last_change = time.time()
-                                continue
-                        except Exception:
-                            pass  # selector not present → proceed normally
+                current = result.get("text", "")
+                mutations = result.get("mutations", 0)
+                cur_len = len(current)
 
-                    current = await self.extract_response(page)
-                    if len(current) > last_len:
-                        last_len = len(current)
-                        last_change = time.time()
-                except Exception as e:
-                    log.warning("[%s] Stability poll interrupted: %s", self.name, e)
-                    break
+                if cur_len > last_len or mutations > 0:
+                    last_len = cur_len
+                    stable_since = time.time()
+                elif cur_len > 20 and (time.time() - stable_since) >= CONTENT_STABILITY_S:
+                    log.info("[%s] Content stable at %d chars (%.1fs, %d mutations)",
+                             self.name, cur_len, time.time() - stable_since, mutations)
+                    return current
+
+                await page.wait_for_timeout(400)
+        finally:
+            # Guaranteed cleanup — disconnect observer, clear state
+            try:
+                await page.evaluate("""() => {
+                    window.__agentchat_observer?.disconnect();
+                    delete window.__agentchat_observer;
+                    delete window.__agentchat_mutations;
+                }""")
+            except Exception:
+                pass
 
         try:
             return await self.extract_response(page)
@@ -359,12 +580,17 @@ class BaseAdapter:
                 # P1: textContent preferred over innerText — no forced reflow,
                 # penetrates Shadow DOM, higher performance. innerText is
                 # layout-aware (triggers style recalculation on every read).
-                text = await page.evaluate("""(sel) => {
+                baseline = getattr(self, '_assistant_baseline', 0)
+                text = await page.evaluate("""([sel, baseline]) => {
                     const els = document.querySelectorAll(sel);
                     if (els.length === 0) return '';
-                    const el = els[els.length - 1];
-                    return (el.textContent || el.innerText || '').trim();
-                }""", sel)
+                    // P0 fix: only extract NEW elements (index >= baseline)
+                    for (let i = els.length - 1; i >= baseline; i--) {
+                        const t = (els[i].innerText || els[i].textContent || '').trim();
+                        if (t.length > 20) return t;
+                    }
+                    return '';
+                }""", [sel, baseline])
                 if text and len(text) > 20:
                     if len(text) > MAX_RESPONSE_SIZE:
                         log.warning("[%s] Response truncated: %d → %d chars",
@@ -488,6 +714,10 @@ class BaseAdapter:
         Noise filtering uses per-marker max-line-length guards so that a
         legitimate sentence like "Claude Code is great for architecture review"
         is NOT stripped just because it contains the word "Claude".
+
+        P0 fix (iteration-3 ChatGPT P0-03): Kimi-specific regex moved to
+        KimiAdapter.clean_response().  The old DOTALL patterns were destroying
+        valid answers across all platforms.
         """
         if not raw_text:
             return ""
@@ -496,19 +726,6 @@ class BaseAdapter:
         # Strip the user's prompt if it appears verbatim at the start
         if prompt and text.startswith(prompt):
             text = text[len(prompt):].strip()
-
-        # P1 fix (2026-06-29): strip Kimi thinking-trace prefix.
-        # Kimi prepends "思考已完成" + rephrased user question before the
-        # actual answer.  The thinking trace ends at the first sentence that
-        # reads like a direct answer (not a rephrasing).
-        import re
-        kimi_markers = [
-            r'^思考已完成\s*',
-            r'^用户要求(用一句话回答|用中文回答|回答|说|：)["""]?[^"""]*["""]?\s*',
-            r'^用户询问[：:]\s*.+?\s*(?=这是一个|根据|基于|回答|答案)',
-        ]
-        for pattern in kimi_markers:
-            text = re.sub(pattern, '', text, flags=re.DOTALL).strip()
 
         # Noise marker removal with line-length guard
         for marker, max_len in self.NOISE_MARKERS:

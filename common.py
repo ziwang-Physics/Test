@@ -14,7 +14,8 @@ where abort() was setting flags outside the Condition lock.
 
 import asyncio, logging, os, sys, time, uuid
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import Literal, Optional
+
 
 # ── Timing constants (previously magic numbers in adapters.py) ─────────────
 
@@ -25,6 +26,231 @@ EDITOR_READY_TIMEOUT_MS = 15_000  # editor visible wait
 INSERT_TEXT_LIMIT     = 50_000   # threshold: keyboard.insert_text vs clipboard
 RESPONSE_STABILITY_S  =      8   # seconds of no-growth before declaring done (was 15)
 STABILITY_POLL_MS     =  1_500   # interval between stability checks (was 2000)
+
+# ── Platform Identity (P0 fix: 5-round review consensus) ────────────────────
+
+class PlatformId:
+    """Canonical platform identifiers — ALWAYS lowercase string constants.
+
+    Usage::
+        key = PlatformId.CHATGPT        # "chatgpt"
+        if name == PlatformId.GEMINI: ...
+
+    ALL state dictionaries, metrics, config keys, and results MUST use
+    these lowercase values.  Only logs/UI use ``PlatformId.display_name(key)``.
+
+    This fixes the P0 bug where orchestrator.py used lowercase ``"chatgpt"``
+    but adapter.name returned uppercase ``"ChatGPT"``, causing tab rotation
+    counters to silently diverge (``_tab_use_count`` grew TWO keys per
+    platform — one never incremented, one never checked).
+    """
+    CHATGPT  = "chatgpt"
+    QIANWEN  = "qianwen"
+    GEMINI   = "gemini"
+    KIMI     = "kimi"
+    CLAUDE   = "claude"
+    DEEPSEEK = "deepseek"
+
+    _ALL: tuple[str, ...] = (CHATGPT, QIANWEN, GEMINI, KIMI, CLAUDE, DEEPSEEK)
+
+    _DISPLAY_NAMES: dict[str, str] = {
+        "chatgpt": "ChatGPT", "qianwen": "Qianwen", "gemini": "Gemini",
+        "kimi": "Kimi", "claude": "Claude", "deepseek": "DeepSeek",
+    }
+
+    @classmethod
+    def display_name(cls, key: str) -> str:
+        """Human-readable label for logs/UI. NEVER use as dict key."""
+        return cls._DISPLAY_NAMES.get(key.lower(), key)
+
+    @classmethod
+    def all(cls) -> tuple[str, ...]:
+        """All valid platform identifiers (lowercase)."""
+        return cls._ALL
+
+    @classmethod
+    def is_valid(cls, key: str) -> bool:
+        """Check if *key* is a recognized platform ID."""
+        return key.lower() in cls._ALL
+
+
+# ── Phase Status (P0 fix: ChatGPT robustness review 2026-06-30) ─────────────
+
+class PhaseStatus:
+    """Quorum-aware result status — replaces blind success: bool.
+
+    HEALTHY        — 3/3 workers succeeded, consensus strong
+    DEGRADED       — 2/3 workers succeeded, still usable
+    LOW_CONFIDENCE — 1/3 workers succeeded, requires extra adjudication
+    FAILED         — 0/3 workers succeeded
+    """
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    LOW_CONFIDENCE = "low_confidence"
+    FAILED = "failed"
+
+    @classmethod
+    def from_success_count(cls, ok: int, total: int) -> str:
+        ratio = ok / max(total, 1)
+        if ratio >= 1.0: return cls.HEALTHY
+        if ratio >= 0.66: return cls.DEGRADED
+        if ratio > 0: return cls.LOW_CONFIDENCE
+        return cls.FAILED
+
+
+# ── Deadline (P0 fix: ChatGPT robustness review 2026-06-30) ─────────────────
+
+@dataclass
+class Deadline:
+    """Monotonic absolute deadline — prevents nested timeouts from overshooting.
+
+    P0 fix (iteration-5 M-01): uses asyncio.get_running_loop().time() (monotonic
+    clock, unaffected by system time adjustments) instead of time.time().
+    No floor on remaining() — callers MUST handle expired deadlines, not silently
+    get extra 500ms per operation that accumulates across serial steps.
+
+    Usage::
+        dl = Deadline.after(600)
+        await asyncio.wait_for(work, timeout=dl.remaining())
+        # ... nested calls all respect the same deadline
+    """
+    _deadline: float = field(default_factory=lambda: Deadline._loop_time() + 600)
+
+    @staticmethod
+    def _loop_time() -> float:
+        """Get current monotonic loop time.  Falls back to time.monotonic()."""
+        try:
+            return asyncio.get_running_loop().time()
+        except RuntimeError:
+            return time.monotonic()
+
+    @classmethod
+    def after(cls, timeout_s: float) -> "Deadline":
+        if timeout_s < 0:
+            raise ValueError(f"timeout_s must be >= 0, got {timeout_s}")
+        return cls(_deadline=cls._loop_time() + timeout_s)
+
+    def remaining(self) -> float:
+        """Seconds left before deadline.  Returns 0.0 when expired (no floor)."""
+        return max(0.0, self._deadline - self._loop_time())
+
+    def expired(self) -> bool:
+        return self._loop_time() >= self._deadline
+
+    def ms_remaining(self, minimum_ms: int = 1) -> int:
+        """Milliseconds left, at least *minimum_ms* for asyncio.wait_for compat."""
+        return max(minimum_ms, int(self.remaining() * 1000))
+
+    def raise_if_expired(self) -> None:
+        """Raise TimeoutError if this deadline has passed."""
+        if self.expired():
+            raise asyncio.TimeoutError("deadline expired")
+
+    def timeout_at(self) -> float | None:
+        """Return absolute time for asyncio.timeout_at(), or None if expired."""
+        rem = self.remaining()
+        return self._deadline if rem > 0 else None
+
+
+# ── Token Estimation (P2 fix: R4 AI recommendation) ─────────────────────────
+
+# Rough token estimator: 1 token ≈ 0.75 words ≈ 4 chars for CJK text.
+# DeepSeek V4 Pro context window: 1M tokens (2026-06).
+# P3 compression bypass thresholds:
+#   < 64k tokens  → skip P3 entirely, pass raw P2 output to P4
+#   < 128k tokens → lightweight P3 (only dedup, no summarization)
+#   >= 128k tokens → full P3 compression matrix
+
+BYPASS_P3_THRESHOLD   =  64_000  # tokens — below this, skip compression
+LIGHT_P3_THRESHOLD    = 128_000  # tokens — below this, dedup only
+DEEPSEEK_CONTEXT_WIN  = 1_000_000  # tokens — V4 Pro max context
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token count for CJK + English mixed text.
+
+    P0 fix (iteration-2 ChatGPT M-02): the old Unicode range ' ' <= c <= '〿'
+    matched spaces, digits, ASCII letters, and many non-CJK characters — treating
+    virtually all English text as CJK.  Now uses correct CJK Unicode blocks:
+    CJK Unified Ideographs, CJK Extension A, CJK punctuation, etc.
+
+    DeepSeek tokenizer ~= 1 token per CJK char, ~0.75 tokens per English word.
+    Conservatively uses 1 token per 3.5 non-CJK chars as safe estimate.
+    """
+    if not text:
+        return 0
+    if not isinstance(text, str):
+        raise TypeError(f"estimate_tokens expects str, got {type(text).__name__}")
+
+    cjk_count = 0
+    non_cjk_count = 0
+    for ch in text:
+        code = ord(ch)
+        if (0x3400 <= code <= 0x4DBF      # CJK Extension A
+            or 0x4E00 <= code <= 0x9FFF   # CJK Unified Ideographs
+            or 0x3000 <= code <= 0x303F   # CJK punctuation
+            or 0xFF00 <= code <= 0xFFEF   # Fullwidth forms
+            or 0x20000 <= code <= 0x2FA1F # CJK Extension B+ (if available)
+        ):
+            cjk_count += 1
+        else:
+            non_cjk_count += 1
+
+    # CJK: ~1 token/char.  Non-CJK: ~1 token/3.5 chars (conservative)
+    return cjk_count + int(non_cjk_count / 3.5)
+
+
+def should_bypass_p3(p2_results: list[dict], matrix_text: str = "") -> tuple[bool, str]:
+    """Decide whether to skip P3 compression and pass raw output to P4.
+
+    Returns (bypass: bool, reason: str).
+    """
+    total = 0
+    for r in p2_results:
+        total += estimate_tokens(r.get("response", ""))
+    total += estimate_tokens(matrix_text)
+
+    if total < BYPASS_P3_THRESHOLD:
+        return True, f"total {total:,} tokens < {BYPASS_P3_THRESHOLD:,} — skip P3 compression"
+    elif total < LIGHT_P3_THRESHOLD:
+        return False, f"total {total:,} tokens < {LIGHT_P3_THRESHOLD:,} — lightweight P3 only"
+    else:
+        return False, f"total {total:,} tokens >= {LIGHT_P3_THRESHOLD:,} — full P3 required"
+
+# ── Structured Error Model (P0 fix: R0 ChatGPT + R2 consensus) ──────────────
+
+# Error taxonomy.  Every worker/adapter error MUST be classified into one of
+# these kinds so the orchestrator can decide next action (retry, degrade, skip,
+# alert) without string-matching.
+ErrorKind = Literal[
+    "none",                    # no error
+    "timeout",                 # generation took longer than deadline
+    "dom_changed",             # selector no longer matches (UI update)
+    "not_authenticated",       # login required / session expired
+    "rate_limited",            # platform throttled requests
+    "cdp_disconnected",        # Chrome CDP WebSocket dropped
+    "injection_incomplete",    # prompt didn't land fully in editor
+    "extraction_incomplete",   # got partial text or empty response
+    "browser_crashed",         # Chrome process died
+    "prompt_echo_dominant",    # response is mostly user's own prompt
+    "ui_chrome_dominant",      # response is mostly navigation/UI labels
+    "empty_or_too_short",      # < 5 meaningful characters
+    "fatal",                   # unrecoverable — do not retry
+    "unknown",                 # unclassified exception
+]
+
+@dataclass(frozen=True, slots=True)
+class ErrorInfo:
+    """Structured error for WorkerResult.  Replaces ad-hoc string error handling.
+
+    All fields have defaults so ``ErrorInfo()`` means "no error" — this fixes
+    the P0 bug where ``ErrorEnvelope(status=...)`` was required but the
+    ``default_factory`` in WorkerResult passed no arguments, causing TypeError.
+    """
+    kind: ErrorKind = "none"
+    message: str = ""
+    retryable: bool = False
+    retry_after_s: float | None = None  # optional backoff hint
 
 # ── CDP Security (P0 fixes 2026-06-28) ─────────────────────────────────────
 
@@ -41,15 +267,29 @@ STABILITY_POLL_MS     =  1_500   # interval between stability checks (was 2000)
 def cdp_url(port: str = "9222") -> str:
     """Build CDP endpoint URL.
 
+    P1 fix (iteration-5): validates port range, URL-encodes the token so
+    special characters (&, #, ?, %) don't change the URL semantics.
+
     If CHROME_CDP_TOKEN is set in the environment, appends ?token= so that
     Chrome's --remote-debugging-token bearer-auth accepts the connection.
     Otherwise returns the bare http://127.0.0.1:<port> URL.
 
     Always binds to 127.0.0.1 (localhost) — never exposes CDP to the network.
     """
+    import urllib.parse
+    try:
+        port_num = int(port)
+        if not 1 <= port_num <= 65535:
+            raise ValueError(f"CDP port out of range: {port_num}")
+    except ValueError:
+        raise ValueError(f"Invalid CDP port: {port!r}") from None
+
     token = os.environ.get("CHROME_CDP_TOKEN", "")
-    base = f"http://127.0.0.1:{port}"
-    return f"{base}?token={token}" if token else base
+    base = f"http://127.0.0.1:{port_num}"
+    if token:
+        query = urllib.parse.urlencode({"token": token})
+        return f"{base}?{query}"
+    return base
 
 
 def verify_cdp_localhost(port: str = "9222") -> tuple[bool, str]:
@@ -77,32 +317,43 @@ def verify_cdp_safe(port: str = "9222") -> tuple[bool, str]:
     import socket, ipaddress
 
     # ── Step 1: DNS rebinding check — resolve + validate IP ──
+    # P0 fix (iteration-8): old code allowed mixed loopback + non-loopback
+    # results ("at least one loopback" → pass).  Now requires ALL results to
+    # be loopback (fail-closed).  Also validates that resolved IP is exactly
+    # 127.0.0.1 or ::1, rejecting unusual loopback addresses.
     try:
         resolved = socket.getaddrinfo("localhost", None, socket.AF_UNSPEC,
                                       socket.SOCK_STREAM)
     except socket.gaierror as e:
         return False, f"DNS resolution for 'localhost' failed: {e}"
 
-    loopback_ips = set()
+    if not resolved:
+        return False, "DNS: 'localhost' resolved to no addresses"
+
+    all_ips = set()
     for family, _, _, _, sockaddr in resolved:
         ip = sockaddr[0]
+        all_ips.add(ip)
         if family == socket.AF_INET:
-            # 127.0.0.0/8
-            if ipaddress.IPv4Address(ip) in ipaddress.IPv4Network("127.0.0.0/8"):
-                loopback_ips.add(ip)
+            if ipaddress.IPv4Address(ip) not in ipaddress.IPv4Network("127.0.0.0/8"):
+                return False, (
+                    f"DNS rebinding risk: 'localhost' resolved to non-loopback "
+                    f"IPv4 address {ip}. Check /etc/hosts."
+                )
         elif family == socket.AF_INET6:
-            if ip == "::1":
-                loopback_ips.add(ip)
+            if ip != "::1":
+                return False, (
+                    f"DNS rebinding risk: 'localhost' resolved to non-loopback "
+                    f"IPv6 address {ip}. Check /etc/hosts."
+                )
+        else:
+            return False, f"DNS: unexpected address family {family} for 'localhost'"
 
-    if not loopback_ips:
+    expected = {"127.0.0.1", "::1"}
+    if all_ips - expected:
         return False, (
-            "DNS rebinding risk: 'localhost' resolved to non-loopback IP(s). "
-            "Check /etc/hosts — 'localhost' must map to 127.0.0.1 or ::1 only."
-        )
-    if any(ip for ip in loopback_ips if ip != "127.0.0.1" and ip != "::1"):
-        return False, (
-            f"DNS: localhost resolved to unusual loopback IPs {loopback_ips}. "
-            "Expected 127.0.0.1 or ::1. Check /etc/hosts."
+            f"DNS: 'localhost' resolved to unexpected loopback IPs: "
+            f"{all_ips - expected}. Expected only 127.0.0.1 or ::1."
         )
 
     # ── Step 2: TCP connectivity check ──
@@ -175,6 +426,10 @@ class AbortableBarrier:
     async def wait(self) -> bool:
         """Wait until all N parties arrive, or until timeout/abort.
 
+        P1 fix (iteration-5): participant cancellation rolls back _count so
+        the barrier doesn't release prematurely when a waiter is cancelled.
+        Cancelled waiters mark the barrier as broken to prevent stale state.
+
         Returns:
             True  — normal release (all parties arrived)
             False — timeout expired or ``abort()`` was called
@@ -191,8 +446,17 @@ class AbortableBarrier:
                     timeout=self.timeout,
                 )
                 return not self._aborted
+            except asyncio.CancelledError:
+                # Roll back count — this waiter won't arrive
+                self._count -= 1
+                if not self._released:
+                    self._aborted = True
+                    self._abort_reason = "participant_cancelled"
+                    self._cond.notify_all()
+                raise
             except asyncio.TimeoutError:
                 # Timeout: auto-abort so other waiters don't hang
+                self._count -= 1
                 if not self._released and not self._aborted:
                     self._aborted = True
                     self._cond.notify_all()
@@ -210,23 +474,47 @@ class AbortableBarrier:
             self._cond.notify_all()
 
 
-# ── Structured Error & Result Types (R2: multi-AI review 2026-06-29) ────────
+# ── Structured Error & Result Types (P0 fix: 5-round review consensus) ───────
 
 @dataclass
 class ErrorEnvelope:
-    """Unified error container for worker/adapter failures.
+    """Unified error container for worker/adapter failures. (BACKWARD COMPAT)
 
-    Replaces ad-hoc string error handling.  Every worker output flows through
-    this envelope so the judge can make informed decisions about partial results.
+    P0 fix (2026-06-29): ``status`` now defaults to ``"ok"`` so that
+    ``WorkerResult(success=True)`` no longer raises TypeError from the
+    ``default_factory`` path.  Prefer ``ErrorInfo`` for new code.
     """
-    status: str           # "ok" | "error" | "timeout" | "rate_limited"
-    error_type: str = ""  # "CDP_DISCONNECT" | "DOM_CHANGED" | "QUOTA_EXHAUSTED" | ...
-    reason: str = ""      # human-readable description
+    status: str = "ok"     # "ok" | "error" | "timeout" | "rate_limited"
+    error_type: str = ""   # "CDP_DISCONNECT" | "DOM_CHANGED" | "QUOTA_EXHAUSTED" | ...
+    reason: str = ""       # human-readable description
     retryable: bool = False
     raw_length: int = 0
+    kind: str = ""         # maps to ErrorKind literal for new code
 
     def is_recoverable(self) -> bool:
         return self.status != "error" or self.retryable
+
+    @staticmethod
+    def should_retry(reason: str) -> bool:
+        """Centralised retry-gate: which validation reasons are retryable.
+
+        P0 fix (2026-06-29): replaces ad-hoc string comparison in orchestrator.
+        """
+        retryable = {"EMPTY_OR_TOO_SHORT", "PROMPT_ECHO_DOMINANT",
+                     "ERROR_PATTERN_DETECTED", "UI_CHROME_DOMINANT",
+                     "CDP_DISCONNECT", "DOM_CHANGED", "QUOTA_EXHAUSTED"}
+        return reason in retryable
+
+    @staticmethod
+    def from_error_info(info: "ErrorInfo") -> "ErrorEnvelope":
+        """Bridge: convert new-style ErrorInfo to legacy ErrorEnvelope."""
+        return ErrorEnvelope(
+            status="ok" if info.kind == "none" else "error",
+            error_type=info.kind,
+            reason=info.message,
+            retryable=info.retryable,
+            kind=info.kind,
+        )
 
 
 @dataclass
@@ -235,13 +523,17 @@ class WorkerResult:
 
     Every adapter MUST return this struct (or a dict compatible with its keys)
     so the orchestrator and judge operate on a uniform schema.
+
+    P0 fix (2026-06-29): ``platform`` is typed as ``str`` for backward compat
+    but SHOULD be a ``PlatformId`` value.  ``error`` defaults to ``ErrorInfo()``
+    (no error) — fixes the TypeError when constructing ``WorkerResult(success=True)``.
     """
-    platform: str          # "chatgpt" | "kimi" | "gemini" | "claude" | "qianwen"
+    platform: str          # PlatformId value, e.g. "chatgpt" (always lowercase)
     success: bool          # was extraction successful?
     response: str = ""     # cleaned response text
     length: int = 0        # character count of response
     confidence: float = 0.0  # 0.0–1.0 heuristic confidence
-    error: ErrorEnvelope = field(default_factory=ErrorEnvelope)
+    error: ErrorInfo = field(default_factory=ErrorInfo)
     timeout: bool = False
     trace_id: str = ""     # correlates logs across pipeline stages
 

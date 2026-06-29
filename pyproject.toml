@@ -1,0 +1,71 @@
+[project]
+name = "multiagent-skill"
+version = "0.2.0"
+description = "Multi-Agent DAG Pipeline: 3-mode concurrent AI platform orchestration with DeepSeek One-Shot Judge"
+readme = "SKILL.md"
+requires-python = ">=3.11,<3.15"
+license = {text = "MIT"}
+authors = [
+    {name = "ziwang-Physics"},
+]
+keywords = ["multi-agent", "playwright", "chrome-cdp", "deepseek", "ai-orchestration"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "playwright>=1.49,<1.52",
+]
+
+[project.optional-dependencies]
+async = [
+    "httpx>=0.28,<0.30",
+]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.24,<1.0",
+    "pytest-playwright>=0.6,<1.0",
+    "ruff>=0.9,<1.0",
+    "mypy>=1.14,<2.0",
+    "httpx>=0.28,<0.30",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = ["*.bak", "__pycache__", ".venv", "dist", "build"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "W",   # pycodestyle warnings
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "UP",  # pyupgrade
+]
+ignore = ["E501"]  # line too long — handled by formatter
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false  # gradual typing
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"

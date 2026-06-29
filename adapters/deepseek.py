@@ -14,7 +14,7 @@ log = logging.getLogger("adapters.deepseek")
 
 
 class DeepSeekAdapter(BaseAdapter):
-    name = "DeepSeek"
+    name = "deepseek"
     EDITOR_SELECTOR = 'textarea'
     SEND_SELECTOR = 'button[aria-label*="发送"], button[aria-label*="Send"]'
     STOP_SELECTOR = 'button[aria-label*="停止"], button[aria-label*="Stop"]'

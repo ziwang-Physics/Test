@@ -13,7 +13,7 @@ log = logging.getLogger("adapters.doubao")
 
 
 class DoubaoAdapter(BaseAdapter):
-    name = "Doubao"
+    name = "doubao"
     EDITOR_SELECTOR = (
         'textarea, div[contenteditable="true"], [role="textbox"], '
         '.input-area textarea, .chat-input'
