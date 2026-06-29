@@ -527,6 +527,23 @@ async def _p2_worker(adapter, prompt: str, results: dict,
                 except Exception:
                     pass
 
+        # P0 fix (R2-series round-1): Gemini thinking mode failure is FATAL.
+        # Old code set thinking_ok=False but continued to inject + send anyway —
+        # Gemini ran without Extended Thinking and returned garbage/empty.
+        if not thinking_ok and name == PlatformId.GEMINI:
+            log.critical("[P2:%s] FATAL: Pro Extended Thinking NOT active — "
+                        "aborting worker (Gemini without ET produces empty/useless responses)",
+                        name)
+            results[name] = {
+                "platform": name, "success": False,
+                "response": "", "length": 0,
+                "timeout": False,
+                "error": "THINKING_MODE_FAILED",
+                "quality": "THINKING_MODE_FAILED",
+                "thinking_verified": False,
+            }
+            return
+
         # P2 fix (2026-06-30): wrap ensure_ready with page-liveness recovery
         try:
             await adapter.ensure_ready(page)
@@ -552,7 +569,7 @@ async def _p2_worker(adapter, prompt: str, results: dict,
             baseline = await adapter._record_assistant_baseline(page)
             adapter._assistant_baseline = baseline
         except Exception:
-            adapter._assistant_baseline = 0
+            adapter._assistant_baseline = {}
 
         # P1: fire immediately — no barrier wait
         await adapter.trigger_send(page)
@@ -623,7 +640,7 @@ async def _p2_worker(adapter, prompt: str, results: dict,
             try:
                 adapter._assistant_baseline = await adapter._record_assistant_baseline(page)
             except Exception:
-                adapter._assistant_baseline = 0
+                adapter._assistant_baseline = {}
             await adapter.trigger_send(page)
             try:
                 raw = await adapter.wait_response(page, timeout_ms=timeout_s * 1000)
@@ -859,17 +876,23 @@ async def phase2_dispatch(prompts: dict,
             await _cancel_and_drain(workers_agg)
 
             # ── Build results ─────────────────────────────────────────
+            # P0 fix (R2-series round-2): quorum eligibility now requires
+            # thinking_verified for platforms that need it.  Old code counted
+            # workers with failed thinking mode as quorum-eligible if their
+            # text happened to pass quality checks.
             _QUORUM_QUALITIES = {"OK", "UI_CHROME_DOMINANT", "DEGRADED_BUT_USABLE"}
             worker_list = []
             for _adapter, _prompt, name in selected:
                 r = results.get(name, {})
                 q = r.get("quality", "unknown")
+                tv = r.get("thinking_verified", True)  # default True for non-thinking platforms
                 worker_list.append({
                     "platform": name, "success": r.get("success", False),
-                    "quorum_eligible": q in _QUORUM_QUALITIES,
+                    "quorum_eligible": q in _QUORUM_QUALITIES and tv,
                     "response": r.get("response", ""), "length": r.get("length", 0),
                     "timeout": r.get("timeout", False), "error": r.get("error", ""),
                     "quality": q,
+                    "thinking_verified": tv,
                 })
 
             quorum_ok = sum(1 for w in worker_list if w["quorum_eligible"])

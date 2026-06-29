@@ -410,26 +410,33 @@ class BaseAdapter:
     # (it's the newest element), not the yet-to-be-generated assistant reply.
     # Fix: record assistant-turn count BEFORE send, only extract index >= baseline.
 
-    async def _record_assistant_baseline(self, page) -> int:
+    async def _record_assistant_baseline(self, page) -> dict:
         """Count existing assistant-turn elements BEFORE sending the prompt.
+
+        P0 fix (R2-series R1): returns per-selector baseline counts instead of
+        a single scalar max.  Old code recorded max(count) across all selectors,
+        then used that single number as the start index for EVERY selector.
+        When selectors have different granularities (e.g. model-message has 12
+        elements but .response-text has 2), the smaller set was never scanned
+        because i >= 12 skipped all its elements.
 
         Called by orchestrator._p2_worker right before trigger_send().
         After generation, wait_response() only looks at elements with
-        index >= baseline — skipping the user message and old history.
+        index >= baseline[sel] — skipping the user message and old history.
         """
         try:
-            count = await page.evaluate("""(strategies) => {
-                let maxCount = 0;
+            counts = await page.evaluate("""(strategies) => {
+                const result = {};
                 for (const sel of strategies) {
-                    const els = document.querySelectorAll(sel);
-                    if (els.length > maxCount) maxCount = els.length;
+                    result[sel] = document.querySelectorAll(sel).length;
                 }
-                return maxCount;
+                return result;
             }""", self.RESPONSE_STRATEGIES)
-            log.info("[%s] Baseline: %d assistant turns in DOM", self.name, count)
-            return count
+            log.info("[%s] Baseline: %s", self.name,
+                     ', '.join(f'{s[:30]}={c}' for s, c in list(counts.items())[:3]))
+            return counts
         except Exception:
-            return 0
+            return {s: 0 for s in self.RESPONSE_STRATEGIES}
 
     # ── Response pipeline ──────────────────────────────────────────────────
 
@@ -506,16 +513,22 @@ class BaseAdapter:
                     except Exception:
                         pass
 
-                # Baseline-aware extraction
+                # P0 fix (R2-series R1): per-selector baseline — old code
+                # used a single scalar for ALL selectors, which skipped new
+                # responses on selectors with fewer total elements.
                 try:
-                    baseline = getattr(self, '_assistant_baseline', 0)
+                    baseline = getattr(self, '_assistant_baseline', {})
+                    # If baseline is still old-style scalar, convert
+                    if isinstance(baseline, (int, float)):
+                        baseline = {s: int(baseline) for s in self.RESPONSE_STRATEGIES}
                     result = await page.evaluate("""([strategies, baseline]) => {
                         const mutations = window.__agentchat_mutations || 0;
                         window.__agentchat_mutations = 0;
                         let text = '';
                         for (const sel of strategies) {
+                            const start = baseline[sel] ?? 0;
                             const els = document.querySelectorAll(sel);
-                            for (let i = els.length - 1; i >= baseline; i--) {
+                            for (let i = els.length - 1; i >= start; i--) {
                                 const t = (els[i].textContent || '').trim();
                                 if (t.length > 20) { text = t; break; }
                             }
@@ -580,17 +593,20 @@ class BaseAdapter:
                 # P1: textContent preferred over innerText — no forced reflow,
                 # penetrates Shadow DOM, higher performance. innerText is
                 # layout-aware (triggers style recalculation on every read).
-                baseline = getattr(self, '_assistant_baseline', 0)
-                text = await page.evaluate("""([sel, baseline]) => {
+                baseline = getattr(self, '_assistant_baseline', {})
+                if isinstance(baseline, (int, float)):
+                    baseline = {s: int(baseline) for s in self.RESPONSE_STRATEGIES}
+                start_idx = baseline.get(sel, 0) if isinstance(baseline, dict) else 0
+                text = await page.evaluate("""([sel, start]) => {
                     const els = document.querySelectorAll(sel);
                     if (els.length === 0) return '';
-                    // P0 fix: only extract NEW elements (index >= baseline)
-                    for (let i = els.length - 1; i >= baseline; i--) {
+                    // P0 fix: only extract NEW elements (index >= per-selector baseline)
+                    for (let i = els.length - 1; i >= start; i--) {
                         const t = (els[i].innerText || els[i].textContent || '').trim();
                         if (t.length > 20) return t;
                     }
                     return '';
-                }""", [sel, baseline])
+                }""", [sel, start_idx])
                 if text and len(text) > 20:
                     if len(text) > MAX_RESPONSE_SIZE:
                         log.warning("[%s] Response truncated: %d → %d chars",

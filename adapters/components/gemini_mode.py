@@ -138,21 +138,31 @@ class GeminiModeController:
         so inconsistent CDK state can't leak across attempts.
         """
         async def _verify() -> tuple[str | None, str | None]:
-            """Read current model + thinking level from DOM. Returns (model, level)."""
+            """Read current model + thinking level from DOM. Returns (model, level).
+
+            P0 fix (R1 Gemini mode): checks both aria-label AND innerText.
+            After Angular CDK re-renders, aria-label may not immediately reflect
+            the thinking level selection.  Fallback to button text content.
+            """
             try:
                 btn = page.locator(self.model_sel).first
                 await btn.wait_for(state="visible", timeout=3000)
-                aria = await btn.get_attribute("aria-label") or ""
+                aria = (await btn.get_attribute("aria-label") or "")
+                inner = (await btn.inner_text() or "")
+                # Combine both sources — inner_text often has level info aria-label misses
+                combined = f"{aria} {inner}"
                 model = None
                 level = None
-                if "Pro" in aria:
+                if "Pro" in combined:
                     model = "pro"
-                elif "Flash" in aria:
+                elif "Flash" in combined:
                     model = "flash"
-                if "延長" in aria or "Extended" in aria or "延长" in aria:
+                if "延長" in combined or "Extended" in combined or "延长" in combined:
                     level = "extended"
-                elif "标准" in aria or "Standard" in aria:
+                elif "标准" in combined or "Standard" in combined:
                     level = "standard"
+                log.info("[Gemini] Verify: model=%s level=%s (aria=%s inner=%s)",
+                        model, level, aria[:60], inner[:60])
                 return model, level
             except Exception:
                 return None, None
@@ -296,22 +306,42 @@ class GeminiModeController:
         return False
 
     async def _select_extended(self, page) -> bool:
-        """Select '延長' (Extended) from submenu."""
+        """Select '延長' (Extended) from submenu.
+
+        P0 fix (R1): tries text-based locator first (more robust against
+        Angular CDK re-renders that change nth indices), then falls back
+        to nth-index click.
+        """
         if not await self._wait_for_menu_items(page):
             log.warning("[Gemini] Submenu items never rendered")
             return False
 
         items = await self._get_menu_items(page)
+        log.info("[Gemini] Menu items for Extended: %s",
+                 ', '.join(f'{it["i"]}:{it["text"][:30]}' for it in items[:8]))
+
+        # Method 1: text-based locator (survives Angular CDK re-renders)
+        try:
+            ext_btn = page.locator("gem-menu-item").filter(has_text="延長").first
+            await ext_btn.wait_for(state="visible", timeout=3000)
+            await ext_btn.click()
+            await asyncio.sleep(1.0)
+            log.info("[Gemini] Selected Extended via text locator")
+            return True
+        except Exception as e:
+            log.debug("[Gemini] Text locator click failed: %s — trying nth", e)
+
+        # Method 2: nth-index fallback
         for it in items:
             if ("延長" in it["text"] and "标准" not in it["text"]
                     and it["visible"]):
                 try:
                     await page.locator("gem-menu-item").nth(it["i"]).click()
                     await asyncio.sleep(1.0)
-                    log.info("[Gemini] Selected Extended thinking")
+                    log.info("[Gemini] Selected Extended via nth(%d)", it["i"])
                     return True
                 except Exception as e:
-                    log.warning("[Gemini] Extended click failed: %s", e)
-                    return False
-        log.warning("[Gemini] '延長' menu item not found")
+                    log.warning("[Gemini] Extended nth click failed: %s", e)
+
+        log.warning("[Gemini] '延長' menu item not found in %d items", len(items))
         return False
