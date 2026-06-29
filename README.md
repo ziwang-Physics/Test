@@ -1,419 +1,244 @@
-<p align="center">
-  <strong>Free Web-SubAgent Workflow for Multi-LLM Evidence Collection, Deliberation, and Arbitration</strong>
-</p><p align="center">
-  基于浏览器自动化的多 Web LLM 证据采集、协作推理与统一仲裁系统
-</p><p align="center">
-  <img alt="Python" src="https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white">
-  <img alt="Playwright" src="https://img.shields.io/badge/Playwright-CDP_Automation-2EAD33?logo=playwright&logoColor=white">
-  <img alt="Architecture" src="https://img.shields.io/badge/Architecture-Multi--Agent-7C3AED">
-  <img alt="Workflow" src="https://img.shields.io/badge/Workflow-Evidence_Driven-0EA5E9">
-  <img alt="Status" src="https://img.shields.io/badge/Status-Actively_Validated-success">
-  <img alt="License" src="https://img.shields.io/badge/License-See_LICENSE-blue">
-</p>OverviewAgentChat is an evidence-driven multi-AI collaboration system built on browser automation.Instead of asking one model to produce a final answer directly, AgentChat decomposes the task into complementary research perspectives, dispatches them to multiple Web LLMs in parallel, compresses the collected evidence into a structured comparison matrix, and performs a final one-shot arbitration through DeepSeek V4 Pro.AgentChat is not merely a multi-model chat interface.It is an asynchronous evidence collection pipeline with an explicit judge.AgentChat 不只是“多模型聊天框”，而是一套带有统一裁决器的异步证据协作系统。The workflow is designed around four phases:PhaseResponsibilityOutputP1 — DecomposeSplit the original question into three complementary perspectivesPerspective-specific promptsP2 — CollectRun ChatGPT, Kimi, and Gemini concurrently through browser CDP sessionsIndependent evidence packagesP3 — CompressNormalize responses into consensus, unique insights, and conflictsStructured evidence matrixP4 — ArbitrateScore, reconcile, and synthesize all evidence with DeepSeek V4 ProFinal answerWhy AgentChat?A single LLM may:overlook an important perspective;become overconfident in an unsupported assumption;reproduce the same reasoning pattern across retries;provide polished conclusions without sufficient evidence;fail silently when context, quota, or browser state changes.AgentChat reduces these risks through:perspective diversity — 多视角问题分解;independent generation — 独立证据采集;explicit disagreement tracking — 显式冲突识别;structured arbitration — 评分、仲裁与合成;quota-aware degradation — 额度感知降级;browser-session reuse — 复用用户现有 Web LLM 会话.ValidationThe workflow has been refined through:more than 20 iterative validation loops;more than 100 independent expert evaluations;repeated failure-path testing across browser disconnections, quota exhaustion, empty responses, timeouts, and partial worker failures.Architecture┌─────────────────────────────────────────────────────────────────────────────┐
-│                               User Question                                 │
-└─────────────────────────────────────┬───────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ P1 · Perspective Decomposition                                               │
-│                                                                             │
-│  ① Engineering Practice       工程实践                                       │
-│  ② Literature & Benchmarks    文献基准                                       │
-│  ③ Reasoning Depth            推理深度                                       │
-└───────────────┬─────────────────────┬─────────────────────┬─────────────────┘
-                │                     │                     │
-                ▼                     ▼                     ▼
-┌───────────────────────┐ ┌───────────────────────┐ ┌───────────────────────┐
-│ ChatGPT Web           │ │ Kimi Web              │ │ Gemini Pro Web        │
-│ Browser/CDP Worker    │ │ Browser/CDP Worker    │ │ Extended Thinking     │
-└───────────────┬───────┘ └───────────────┬───────┘ └───────────────┬───────┘
-                │                         │                         │
-                └─────────────────────────┼─────────────────────────┘
-                                          │
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ P3 · Evidence Compression                                                    │
-│                                                                             │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
-│  │ Consensus Zone  │  │ Unique Zone     │  │ Conflict Zone               │  │
-│  │ 共识区          │  │ 特色区          │  │ 冲突区                      │  │
-│  └─────────────────┘  └─────────────────┘  └─────────────────────────────┘  │
-└─────────────────────────────────────┬───────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ P4 · DeepSeek V4 Pro One-Shot Arbitration                                    │
-│                                                                             │
-│  Score → Verify → Resolve Conflicts → Synthesize                             │
-│  评分  → 证据审查 → 冲突仲裁 → 最终合成                                      │
-└─────────────────────────────────────┬───────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              Final Answer                                   │
-└─────────────────────────────────────────────────────────────────────────────┘Runtime ModesAgentChat selects one of three execution modes according to task complexity and expected disagreement.ModeTypical usageBehaviorPARALLELDefault for more than 90% of tasksRuns independent Web LLM workers concurrently, then performs structured arbitrationSIMPLEExtremely simple factual questionsUses a reduced path to avoid unnecessary orchestration overheadCONSENSUSHigh-risk, ambiguous, or strongly conflicting questionsExpands verification and escalates disagreement resolution                          ┌──────────────┐
-                          │ User Request │
-                          └──────┬───────┘
-                                 │
-                         Complexity Analysis
-                                 │
-              ┌──────────────────┼──────────────────┐
-              │                  │                  │
-              ▼                  ▼                  ▼
-        ┌──────────┐       ┌──────────┐       ┌───────────┐
-        │  SIMPLE  │       │ PARALLEL │       │ CONSENSUS │
-        └──────────┘       └──────────┘       └───────────┘
-          Low cost           Default path       Conflict-awareDegradation and EscalationAgentChat is designed to continue producing useful results even when one or more providers are unavailable.Gemini quota exhausted ─┐
-                        ├──► Qwen Deep Thinking replacement
-ChatGPT quota exhausted ┘
+# AgentChat
 
-High-complexity task
-        │
-        └──► Claude escalation for additional analysis
-
-Partial worker failure
-        │
-        ├──► Continue when quorum is still valid
-        └──► Mark missing evidence explicitlyThe degradation chain follows three principles:Never hide a failed source.失败来源必须显式标记，不能伪装成成功结果。Preserve source independence.A replacement worker should generate its own answer rather than rewrite another worker's response.Prefer a transparent partial result over silent fabrication.宁可返回可解释的部分结果，也不静默补全不存在的证据。Quick StartPrerequisitesBefore running AgentChat, prepare:Python 3;Google Chrome or Chromium;an authenticated browser session for the enabled Web LLM platforms;Playwright and the required Python dependencies;a DeepSeek API key for final arbitration;optional access to Qwen and Claude for fallback or escalation.1. Clone the Repositorygit clone <repository-url>
-cd AgentChat2. Create a Virtual Environmentpython -m venv .venvActivate it:# Linux / macOS
-source .venv/bin/activate# Windows PowerShell
-.venv\Scripts\Activate.ps13. Install Dependenciespip install -r requirements.txt
-playwright install chromium4. Configure Environment VariablesCreate a local environment file:cp .env.example .envAt minimum, configure the DeepSeek API key:DEEPSEEK_API_KEY=your_deepseek_api_keyDo not commit .env, browser profiles, session cookies, API keys, or generated authentication state.5. Start Chrome with Remote DebuggingLinux or macOS:./start-chrome-debug.shA typical manual command is:google-chrome \
+**基于浏览器自动化并发调度多个网页大模型、采集多视角证据，并由统一裁决模型生成最终答案的多人工智能协作系统。**基于浏览器自动化并发调度多个网页大模型、采集多视角证据，并由统一裁决模型生成最终答案的多人工智能协作系统。    概述AgentChat 是一个基于浏览器自动化的多网页大模型证据采集与协作推理系统。它不是简单地把同一个问题发送给多个模型，也不是将多份回答直接拼接。AgentChat 会先拆解问题，再让不同模型从互补视角独立分析，随后压缩共识、差异与冲突，最后交由 DeepSeek V4 Pro API 完成评分、仲裁和答案合成。系统默认调度三个免费的网页人工智能服务：ChatGPT：侧重工程实践、实现路径、边界条件与可执行性。Kimi：侧重文献基准、资料覆盖、事实核验与背景补充。Gemini Pro Extended Thinking：侧重复杂推理、反例分析、长链路思考与深层约束。三个 Worker 通过 Chrome CDP 并发运行，不要求为每个网页模型配置独立接口密钥。最终结果由 DeepSeek V4 Pro API 统一裁决，避免简单投票造成的多数偏差。完整流程分为四个阶段：第一阶段：分析问题难度，并生成三个互补视角的提示词。第二阶段：通过 Chrome CDP 并发调度 ChatGPT、Kimi 和 Gemini。第三阶段：将多模型结果压缩为共识区、特色区和冲突区。第四阶段：由 DeepSeek V4 Pro API 评分、仲裁并生成最终答案。## 架构                              用户问题
+                                 │
+                                 ▼
+                    ┌────────────────────────┐
+                    │ 第一阶段：问题分析与拆解 │
+                    │ 难度判断、模式选择、提示词 │
+                    └───────────┬────────────┘
+                                │
+              ┌─────────────────┼─────────────────┐
+              │                 │                 │
+              ▼                 ▼                 ▼
+    ┌────────────────┐ ┌────────────────┐ ┌────────────────────┐
+    │ ChatGPT Worker │ │  Kimi Worker   │ │   Gemini Worker    │
+    │ 工程实践视角    │ │ 文献基准视角    │ │ 深度推理视角        │
+    └───────┬────────┘ └───────┬────────┘ └─────────┬──────────┘
+            │                  │                    │
+            └──────────────────┼────────────────────┘
+                               │
+                       Chrome CDP 并发调度
+                               │
+                               ▼
+                    ┌────────────────────────┐
+                    │ 第三阶段：证据压缩矩阵   │
+                    │                        │
+                    │ - 共识区               │
+                    │ - 特色区               │
+                    │ - 冲突区               │
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+                    │ DeepSeek V4 Pro API    │
+                    │ 评分、仲裁、冲突消解    │
+                    │ 最终答案合成            │
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                             最终结果当主要 Worker 不可用时，系统会进入自动降级链：ChatGPT、Kimi 或 Gemini 不可用
+              │
+              ▼
+       自动切换千问深度思考
+              │
+              ▼
+      判断问题是否仍然存在高冲突
+              │
+       ┌──────┴──────┐
+       │             │
+       否            是
+       │             │
+       ▼             ▼
+  继续完成裁决    启动 Claude 兜底为什么选择 AgentChat多视角而非重复回答不同 Worker 使用不同任务提示词，分别承担工程实践、文献基准和推理深度职责，减少多个模型产生高度相似答案的问题。网页模型优先，降低使用成本ChatGPT、Kimi 和 Gemini 通过已登录的浏览器页面工作，不依赖三个独立的付费模型接口。并发采集，缩短等待时间三个 Worker 通过 Chrome CDP 同时运行，整体耗时接近最慢单个 Worker，而不是三个模型耗时之和。裁决而非简单投票DeepSeek V4 Pro 会结合证据质量、推理完整性、事实一致性和任务适配度进行评分，不会机械地选择多数意见。显式保留冲突系统会区分共识、独有发现和冲突结论。存在争议时，裁决器必须说明采用某一结论的原因。支持自动降级当网页模型额度耗尽、页面异常或生成失败时，系统可以切换到千问；面对高风险、高复杂度或高冲突任务时，可以进一步启动 Claude。面向长时间运行设计系统包含连接恢复、页面租约、超时控制、错误分类、Worker 隔离和安全清理机制，适合连续执行多轮任务。执行模式模式适用场景Worker 数量是否进行统一裁决特点PARALLEL默认模式，适用于绝大多数问题3是并发采集三个视角，在质量、速度和成本之间取得平衡SIMPLE极简单事实、短答案或无需争议分析的问题1按需跳过完整多模型流程，优先降低延迟CONSENSUS高风险、高冲突或需要更强证据一致性的问题3 个以上是扩大验证范围，必要时启动千问或 ClaudePARALLEL 模式PARALLEL 是默认模式，适用于超过九成的常规任务。执行过程：为三个 Worker 生成不同视角的提示词。并发采集 ChatGPT、Kimi 和 Gemini 的回答。提取共识、特色发现和冲突。交由 DeepSeek V4 Pro 完成最终裁决。SIMPLE 模式SIMPLE 用于答案明确、推理成本较低的问题，例如：简单定义。单一事实查询。短文本转换。不需要多视角验证的基础任务。该模式会减少 Worker 数量，并在证据充分时跳过复杂仲裁。CONSENSUS 模式CONSENSUS 用于以下任务：多个模型结论明显冲突。涉及复杂架构、关键决策或高风险判断。需要更严格的事实核验。单轮回答置信度不足。用户明确要求多模型共识。该模式会提高证据要求，并根据任务难度启动千问或 Claude 进行补充验证。Worker 角色Worker默认平台核心职责重点检查工程实践 WorkerChatGPT提供可执行方案、代码路径和工程判断可实现性、异常处理、性能、维护成本、边界条件文献基准 WorkerKimi补充资料、基准、背景与事实依据来源覆盖、术语准确性、行业基准、历史信息推理深度 WorkerGemini Pro Extended Thinking进行复杂推理、反例构造和约束分析隐含假设、逻辑漏洞、反例、长期影响、冲突解释替补 Worker千问深度思考在主要 Worker 不可用时接管任务回答完整性、推理连续性、可用性恢复高难度 WorkerClaude处理棘手问题和高冲突升级深层综合、复杂代码分析、长上下文一致性最终裁决器DeepSeek V4 Pro API评分、仲裁、冲突消解和答案合成证据权重、事实一致性、任务匹配度、最终可读性每个 Worker 都应独立完成任务，不能依赖其他 Worker 的中间结论。这样可以降低观点污染，并保留真正的模型差异。降级与兜底AgentChat 将网页模型异常分为额度、页面、网络、浏览器和内容五类，并根据错误类型选择不同的恢复策略。异常情况首选处理后续处理网页模型额度耗尽标记当前平台暂时不可用自动切换千问页面结构变化重新定位输入框和响应区域重建标签页并再次执行单个标签页崩溃释放当前页面租约创建新标签页重新运行对应 WorkerChrome CDP 暂时断开取消当前批次并清理任务重新连接浏览器后重跑当前阶段Worker 超时保留其他 Worker 的有效结果根据法定数量决定继续裁决或启动替补返回空内容重新提取并检查生成状态重新执行对应 Worker三个模型结论高度冲突切换到 CONSENSUS 模式启动 Claude 进行补充分析DeepSeek 裁决失败保留结构化证据矩阵使用备用裁决配置重试默认降级顺序：主要 Worker
+    │
+    ├─ 正常完成 ────────────────► 进入证据压缩
+    │
+    └─ 失败
+         │
+         ▼
+    同平台重试
+         │
+         ├─ 成功 ───────────────► 进入证据压缩
+         │
+         └─ 失败
+              │
+              ▼
+         千问深度思考替补
+              │
+              ├─ 证据充分 ──────► DeepSeek 裁决
+              │
+              └─ 仍有高冲突
+                   │
+                   ▼
+               Claude 兜底降级不会静默发生。最终结果中应记录：哪些 Worker 成功。哪些 Worker 失败。是否发生重试。是否启用替补平台。是否进入共识升级。最终裁决依据了哪些有效证据。快速开始环境要求Python 3.11 或更高版本。Google Chrome 或 Chromium。已安装 Playwright。Chrome 已登录需要使用的网页人工智能平台。可用的 DeepSeek V4 Pro API 密钥。Linux、macOS 或 Windows 环境。获取项目git clone https://github.com/你的账号/AgentChat.git
+cd AgentChat创建虚拟环境python -m venv .venv
+source .venv/bin/activateWindows PowerShell：.venv\Scripts\Activate.ps1安装依赖pip install -r requirements.txt
+playwright install chromium配置环境变量cp .env.example .env编辑 .env：DEEPSEEK_API_KEY=你的接口密钥
+CDP_ENDPOINT=http://127.0.0.1:9222
+DEFAULT_MODE=PARALLEL
+LOG_LEVEL=INFO启动 Chrome 调试端口Linux 或 macOS：google-chrome \
   --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.agentchat/chrome-profile"Windows example:chrome.exe `
+  --user-data-dir="$HOME/.agentchat-chrome"部分 Linux 环境中的命令可能是：chromium \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.agentchat-chrome"Windows PowerShell：& "C:\Program Files\Google\Chrome\Application\chrome.exe" `
   --remote-debugging-port=9222 `
-  --user-data-dir="$env:USERPROFILE\.agentchat\chrome-profile"Log in to the required Web LLM platforms in this browser profile before running AgentChat.6. Run AgentChatpython main.py "Review this architecture and identify the highest-risk failure modes."Explicitly select a mode:python main.py \
-  --mode parallel \
-  "Compare three approaches to reliable browser-session recovery."For structured output:python main.py \
-  --mode consensus \
-  --output-format json \
-  "Evaluate the safety and correctness of this concurrent orchestration design."UsageBasic Querypython main.py "Explain the trade-offs between polling and event-driven browser monitoring."Engineering Reviewpython main.py \
-  --mode parallel \
-  "Review this async Python architecture for race conditions, resource leaks, and timeout bugs."Literature and Benchmark Comparisonpython main.py \
-  --mode parallel \
-  "Compare current long-context evaluation methods and identify limitations in their benchmark design."High-Conflict AnalysisUse CONSENSUS mode when:the answer may influence an important engineering decision;available sources are likely to disagree;the question contains ambiguous assumptions;independent verification is more important than latency;the first-pass workers return materially different conclusions.python main.py \
-  --mode consensus \
-  "Should this browser automation system use one shared BrowserContext or isolated contexts per worker?"Simple ModeUse SIMPLE mode for low-complexity tasks that do not justify full multi-agent execution.python main.py \
-  --mode simple \
-  "What does CDP stand for?"Read from Standard Inputcat prompt.txt | python main.py --stdinSave the Final Resultpython main.py \
-  --output result.md \
-  "Produce a deployment-readiness review for this repository."JSON Outputpython main.py \
-  --output-format json \
-  "Analyze the failure modes of the worker lifecycle."Example response shape:{
-  "status": "success",
-  "mode": "parallel",
-  "query": "Analyze the failure modes of the worker lifecycle.",
-  "result": {
-    "summary": "Final synthesized answer",
-    "consensus": [],
-    "unique_insights": [],
-    "conflicts": [],
-    "recommendations": []
-  },
-  "workers": {
-    "chatgpt": {
-      "status": "success"
-    },
-    "kimi": {
-      "status": "success"
-    },
-    "gemini": {
-      "status": "degraded",
-      "replacement": "qwen"
-    }
-  }
-}Python Integrationimport asyncio
+  --user-data-dir="$env:USERPROFILE\.agentchat-chrome"Chrome 启动后，在该浏览器窗口中登录需要使用的平台：ChatGPT。Kimi。Gemini。千问。Claude。运行 AgentChatpython main.py "如何为一个多模型调度系统设计可靠的浏览器断线恢复机制？"指定执行模式：python main.py \
+  --mode PARALLEL \
+  "比较三种异步任务取消策略，并给出适合生产环境的方案。"配置说明AgentChat 支持通过环境变量和配置文件管理运行参数。敏感信息应放在 .env 中，调度策略应放在配置文件中。环境变量变量必填默认值说明DEEPSEEK_API_KEY是无DeepSeek V4 Pro API 密钥CDP_ENDPOINT否http://127.0.0.1:9222Chrome DevTools Protocol 地址DEFAULT_MODE否PARALLEL默认执行模式LOG_LEVEL否INFO日志级别MAX_RETRIES否2单个 Worker 的最大重试次数WORKER_TIMEOUT_SECONDS否300单个 Worker 的生成超时时间ARBITER_TIMEOUT_SECONDS否180最终裁决超时时间ENABLE_QIANWEN_FALLBACK否true是否启用千问替补ENABLE_CLAUDE_ESCALATION否true是否允许高难度任务启动 ClaudeMIN_SUCCESSFUL_WORKERS否2PARALLEL 模式进入裁决所需的最少成功 Worker 数量调度配置示例配置文件 config.yaml：运行模式:
+  默认模式: PARALLEL
+  自动升级共识模式: true
 
-from orchestrator import AgentChatOrchestrator
+浏览器:
+  调试地址: http://127.0.0.1:9222
+  导航超时秒数: 60
+  单页最大复用次数: 10
+  断线自动重连: true
+
+并发:
+  最大并发Worker数: 3
+  最少成功Worker数: 2
+  Worker超时秒数: 300
+
+重试:
+  最大重试次数: 2
+  首次退避秒数: 2
+  最大退避秒数: 15
+
+降级:
+  启用千问替补: true
+  启用Claude升级: true
+  高冲突阈值: 0.65
+
+裁决:
+  模型: deepseek-v4-pro
+  超时秒数: 180
+  输出冲突说明: true
+  输出证据摘要: true
+
+日志:
+  级别: INFO
+  结构化输出: true
+  保存运行报告: true
+  报告目录: runs模式选择规则模式选择:
+  SIMPLE:
+    最大预计复杂度: 低
+    是否需要多来源验证: false
+
+  PARALLEL:
+    最大预计复杂度: 高
+    是否需要多来源验证: true
+
+  CONSENSUS:
+    触发条件:
+      - 高风险任务
+      - 主要结论冲突
+      - 有效Worker少于预期
+      - 用户明确要求共识配置文件中的接口密钥、登录凭证和令牌不得提交到版本库。建议将以下内容加入 .gitignore：.env
+.venv/
+__pycache__/
+runs/
+logs/
+.agentchat-chrome/
+*.log使用示例默认并发模式python main.py \
+  "请审查一个基于 Playwright 的多标签页并发系统，重点检查竞态条件、资源泄漏和超时传播。"执行流程：ChatGPT 分析工程实现和错误处理。Kimi 查找相关基准与常见故障模式。Gemini 分析并发边界、反例和隐含假设。DeepSeek 对三个结果进行评分和统一裁决。极简模式python main.py \
+  --mode SIMPLE \
+  "什么是 Chrome CDP？"该模式适合不需要多模型交叉验证的简单问题。共识升级模式python main.py \
+  --mode CONSENSUS \
+  "在共享 BrowserContext 中并发运行多个 Worker 是否安全？请分析不同实现方案的风险。"该模式会提高证据要求，并在主要结论无法收敛时启动额外 Worker。从文件读取问题python main.py \
+  --input question.txt \
+  --mode PARALLEL输出结构化结果python main.py \
+  --mode PARALLEL \
+  --output result.json \
+  --format json \
+  "分析当前架构中可能导致静默数据损坏的路径。"结构化输出示例：{
+  "状态": "成功",
+  "## 执行模式": "PARALLEL",
+  "最终答案": "最终裁决后的完整答案",
+  "共识区": [
+    "三个 Worker 共同确认的结论"
+  ],
+  "特色区": {
+      "工程实现方面的独有发现"
+    ],
+      "文献或基准方面的独有发现"
+    ],
+    "Gemini": [
+      "复杂推理方面的独有发现"
+    ]
+  },
+  "冲突区": [
+    {
+      "主题": "存在分歧的问题",
+      "采用结论": "裁决器最终采用的结论",
+      "裁决理由": "证据权重和推理依据"
+    }
+  ],
+  "Worker状态": {
+    "ChatGPT": "成功",
+    "Kimi": "成功",
+    "Gemini": "成功"
+  },
+  "是否发生降级": false
+}作为 Python 模块调用import asyncio
+
+from agentchat import AgentChat
+from agentchat.models import ExecutionMode
 
 
 async def main() -> None:
-    orchestrator = AgentChatOrchestrator()
+    client = AgentChat.from_config("config.yaml")
 
-    result = await orchestrator.run(
-        query=(
-            "Review this distributed workflow for race conditions, "
-            "silent failures, and recovery gaps."
-        ),
-        mode="parallel",
+    result = await client.run(
+        question="如何改进异步任务取消时的资源清理完整性？",
+        mode=ExecutionMode.PARALLEL,
     )
 
     print(result.final_answer)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())ConfigurationAgentChat can be configured through environment variables, command-line arguments, or a project configuration file.A recommended precedence order is:CLI arguments
-    ↓
-Environment variables
-    ↓
-Configuration file
-    ↓
-Built-in defaultsEnvironment Variables# ---------------------------------------------------------------------------
-# Required
-# ---------------------------------------------------------------------------
-
-DEEPSEEK_API_KEY=your_deepseek_api_key
-
-# ---------------------------------------------------------------------------
-# Browser / CDP
-# ---------------------------------------------------------------------------
-
-AGENTCHAT_CDP_ENDPOINT=http://127.0.0.1:9222
-AGENTCHAT_BROWSER_CONNECT_TIMEOUT=15
-AGENTCHAT_PAGE_READY_TIMEOUT=30
-AGENTCHAT_GENERATION_TIMEOUT=180
-
-# ---------------------------------------------------------------------------
-# Execution
-# ---------------------------------------------------------------------------
-
-AGENTCHAT_MODE=parallel
-AGENTCHAT_MAX_CONCURRENCY=3
-AGENTCHAT_MIN_QUORUM=2
-AGENTCHAT_MAX_RETRIES=2
-
-# ---------------------------------------------------------------------------
-# Platforms
-# ---------------------------------------------------------------------------
-
-AGENTCHAT_ENABLE_CHATGPT=true
-AGENTCHAT_ENABLE_KIMI=true
-AGENTCHAT_ENABLE_GEMINI=true
-AGENTCHAT_ENABLE_QWEN_FALLBACK=true
-AGENTCHAT_ENABLE_CLAUDE_ESCALATION=true
-
-# ---------------------------------------------------------------------------
-# Output and observability
-# ---------------------------------------------------------------------------
-
-AGENTCHAT_LOG_LEVEL=INFO
-AGENTCHAT_LOG_FORMAT=json
-AGENTCHAT_OUTPUT_FORMAT=markdown
-AGENTCHAT_ARTIFACT_DIR=./artifactsConfiguration FileExample agentchat.yaml:runtime:
-  mode: parallel
-  max_concurrency: 3
-  minimum_quorum: 2
-  max_retries: 2
-
-browser:
-  cdp_endpoint: http://127.0.0.1:9222
-  connect_timeout_seconds: 15
-  page_ready_timeout_seconds: 30
-  generation_timeout_seconds: 180
-  rotate_tab_after_uses: 20
-
-platforms:
-  chatgpt:
-    enabled: true
-    role: engineering
-
-  kimi:
-    enabled: true
-    role: literature
-
-  gemini:
-    enabled: true
-    role: reasoning
-    extended_thinking: true
-
-  qwen:
-    enabled: true
-    fallback_for:
-      - chatgpt
-      - gemini
-    deep_thinking: true
-
-  claude:
-    enabled: true
-    escalation_only: true
-
-arbitration:
-  provider: deepseek
-  model: deepseek-v4-pro
-  strategy: one_shot
-  require_conflict_resolution: true
-
-output:
-  format: markdown
-  include_worker_metadata: true
-  include_conflict_matrix: true
-  artifact_directory: ./artifacts
-
-logging:
-  level: INFO
-  format: json
-  redact_sensitive_values: trueRun with a configuration file:python main.py \
-  --config agentchat.yaml \
-  "Audit the reliability of this browser automation pipeline."Key OptionsOptionDefaultDescriptionmodeparallelRuntime strategy: simple, parallel, or consensusmax_concurrency3Maximum number of concurrent browser workersminimum_quorum2Minimum successful independent responses requiredmax_retries2Maximum retry count for retryable worker failuresgeneration_timeout_seconds180Per-worker generation deadlinerotate_tab_after_uses20Number of runs before a reused tab is rotatedextended_thinkingtrueEnables Gemini Extended Thinking when availableescalation_onlytruePrevents Claude from running on ordinary requestsredact_sensitive_valuestrueRemoves tokens and session secrets from logsPlatform RolesThe default roles are intentionally asymmetric.PlatformPrimary role中文说明ChatGPTEngineering feasibility and implementation details工程实践KimiSource discovery, literature context, and benchmark coverage文献基准Gemini Pro Extended ThinkingDeep reasoning, edge cases, and alternative hypotheses推理深度Qwen Deep ThinkingQuota fallback and replacement worker深度思考替补ClaudeEscalation for unusually difficult or unresolved tasks棘手问题升级DeepSeek V4 ProFinal scoring, conflict resolution, and synthesis终审裁决These roles are defaults, not hard restrictions. The orchestrator may modify prompts according to the task.File StructureAgentChat/
-├── main.py                         # Primary CLI entry point
-├── orchestrator.py                 # Four-phase orchestration workflow
-├── common.py                       # Shared models, enums, errors, deadlines
-├── connection.py                   # CDP connection and reconnection manager
-├── heartbeat.py                    # Browser and tab health supervision
-│
+    asyncio.run(main())项目结构AgentChat/
+├── main.py                     # 命令行入口
+├── orchestrator.py             # 多阶段调度与执行模式控制
+├── connection.py               # Chrome CDP 连接与重连管理
+├── heartbeat.py                # 浏览器和标签页健康检查
+├── common.py                   # 公共数据结构、错误类型和工具函数
+├── config.yaml                 # 默认运行配置
+├── .env.example                # 环境变量示例
+├── requirements.txt            # Python 依赖
 ├── adapters/
-│   ├── __init__.py                 # Adapter registry
-│   ├── base.py                     # Base injection/extraction pipeline
-│   ├── chatgpt.py                  # ChatGPT Web adapter
-│   ├── kimi.py                     # Kimi Web adapter
-│   ├── gemini.py                   # Gemini Web adapter
-│   ├── qianwen.py                  # Qwen fallback adapter
-│   ├── claude.py                   # Claude escalation adapter
-│   ├── deepseek.py                 # DeepSeek arbitration client
-│   ├── _deprecated.py              # Retired compatibility adapters
-│   │
+│   ├── __init__.py             # 平台适配器注册
+│   ├── base.py                 # 适配器基础接口
+│   ├── chatgpt.py              # ChatGPT 网页适配器
+│   ├── kimi.py                 # Kimi 网页适配器
+│   ├── gemini.py               # Gemini 网页适配器
+│   ├── qianwen.py              # 千问替补适配器
+│   ├── claude.py               # Claude 高难度适配器
+│   ├── deepseek.py             # DeepSeek 裁决器
 │   └── components/
-│       ├── gemini_editor.py        # Gemini prompt injection and submission
-│       ├── gemini_completion.py    # Generation completion detection
-│       ├── gemini_extraction.py    # Response extraction
-│       └── gemini_mode.py          # Extended Thinking mode control
-│
-├── prompts/
-│   ├── decomposition.md            # P1 perspective decomposition
-│   ├── engineering.md              # Engineering-practice worker prompt
-│   ├── literature.md               # Literature and benchmark worker prompt
-│   ├── reasoning.md                # Deep-reasoning worker prompt
-│   ├── compression.md              # P3 evidence compression prompt
-│   └── arbitration.md              # P4 final judge prompt
-│
-├── reference/
-│   ├── platform-maturity.md        # Platform support and maturity matrix
-│   ├── error-taxonomy.md           # Error classification reference
-│   └── architecture.md             # Detailed architecture notes
-│
+│       ├── gemini_editor.py     # Gemini 输入与发送控制
+│       ├── gemini_completion.py # Gemini 完成状态检测
+│       ├── gemini_extraction.py # Gemini 响应提取
+│       └── gemini_mode.py       # Gemini 深度思考模式控制
+├── pipeline/
+│   ├── decomposition.py        # 问题拆解与视角提示词生成
+│   ├── collection.py           # 多 Worker 并发证据采集
+│   ├── compression.py          # 共识区、特色区和冲突区压缩
+│   └── arbitration.py          # 评分、仲裁和最终合成
+├── models/
+│   ├── result.py               # 统一结果结构
+│   ├── error.py                # 错误分类与错误传播模型
+│   └── worker.py               # Worker 状态与执行记录
 ├── tests/
-│   ├── test_orchestrator.py        # End-to-end orchestration tests
-│   ├── test_connection.py          # Reconnect and epoch tests
-│   ├── test_heartbeat.py           # Browser/tab supervision tests
-│   ├── test_adapters.py            # Adapter contract tests
-│   ├── test_error_propagation.py   # Error classification and propagation
-│   └── fixtures/                   # Browser and response fixtures
-│
-├── artifacts/                      # Generated reports and evidence packages
-├── start-chrome-debug.sh           # Chrome CDP startup helper
-├── agentchat.yaml                  # Example runtime configuration
-├── .env.example                    # Environment variable template
-├── requirements.txt                # Python dependencies
-├── SKILL.md                        # Agent/skill integration contract
-├── LICENSE
-└── README.mdDesign1. Evidence Before SynthesisAgentChat separates evidence collection from final answer generation.Workers do not collaboratively edit one shared draft. Each worker receives an independent prompt and produces an independent evidence package.This avoids:early anchoring;majority imitation;shared hallucination propagation;one dominant model suppressing minority evidence.Independent Evidence
-        │
-        ▼
-Structured Comparison
-        │
-        ▼
-Explicit Arbitration
-        │
-        ▼
-Final Synthesis2. Perspective-Oriented DecompositionP1 creates three prompts with distinct objectives.Engineering Practice — 工程实践Focus areas include:implementation feasibility;operational failure modes;concurrency and lifecycle correctness;performance and resource usage;maintainability;concrete code-level recommendations.Literature and Benchmarks — 文献基准Focus areas include:published methods;standard terminology;benchmark design;comparable systems;empirical evidence;limitations of existing evaluations.Reasoning Depth — 推理深度Focus areas include:hidden assumptions;second-order effects;adversarial cases;alternative explanations;logical consistency;unresolved uncertainty.3. Structured Evidence MatrixP3 does not simply concatenate worker responses.It converts them into three explicit regions:RegionMeaning中文说明Consensus ZoneClaims supported independently by multiple workers共识区Unique ZoneValuable insights raised by only one worker特色区Conflict ZoneClaims, assumptions, or recommendations that disagree冲突区Example:## Consensus Zone
-
-- Browser disconnection must be propagated through a shared lifecycle signal.
-- Worker retries must use a fresh browser epoch.
-- Timeouts should be classified separately from confirmed browser death.
-
-## Unique Zone
-
-- Gemini identified a potential stale DOM completion signal.
-- Kimi found a comparable failure mode in an external implementation.
-- ChatGPT proposed a lease-based cleanup invariant.
-
-## Conflict Zone
-
-| Topic | Position A | Position B | Required decision |
-|---|---|---|---|
-| BrowserContext reuse | More efficient | Higher shared-state risk | Isolate only high-risk workers |4. One-Shot ArbitrationThe final judge receives the compressed matrix rather than an unbounded transcript.Its responsibilities are:evaluate evidence quality;detect unsupported agreement;preserve important minority findings;resolve contradictions where possible;expose unresolved uncertainty;synthesize an actionable final answer.The judge should not treat majority agreement as proof.Agreement ≠ Correctness
-Disagreement ≠ Failure
-Minority Evidence ≠ Noise5. Quorum-Aware ExecutionA single worker failure should not always invalidate the full run.AgentChat can continue when:enough independent workers completed successfully;the missing worker is clearly identified;the remaining evidence satisfies the configured quorum;the final judge receives accurate worker-status metadata.A run should fail or escalate when:quorum cannot be reached;all surviving workers are derived from the same fallback source;evidence is empty or structurally invalid;browser state is no longer trustworthy;the judge cannot distinguish successful and degraded inputs.6. Failure ClassificationFailures are classified by meaning rather than by raw exception text.Recommended categories include:CONFIGURATION_ERROR
-AUTHENTICATION_REQUIRED
-QUOTA_EXHAUSTED
-RATE_LIMITED
-NAVIGATION_FAILED
-INJECTION_FAILED
-GENERATION_TIMEOUT
-EMPTY_RESPONSE
-EXTRACTION_FAILED
-TAB_CRASHED
-BROWSER_DISCONNECTED
-ARBITRATION_FAILED
-CANCELLED
-INTERNAL_ERROREach error should carry structured context:{
-  "code": "GENERATION_TIMEOUT",
-  "platform": "gemini",
-  "retryable": true,
-  "degraded": false,
-  "message": "Gemini did not finish before the worker deadline.",
-  "action": "Retry once, then replace the worker with Qwen Deep Thinking."
-}7. Browser Lifecycle SafetyBrowser automation is treated as an unreliable distributed boundary.Important invariants include:a page lease belongs to exactly one browser epoch;pages from an old epoch must never be reused after reconnect;cleanup must be idempotent;worker cancellation must be awaited and drained;a slow CDP response must not automatically imply browser death;tab failure and browser failure must remain distinguishable;user interruption must trigger complete resource cleanup.8. Quota-Aware FallbackFallback is based on explicit failure classification.Primary worker succeeds
-        │
-        └──► Keep original result
-
-Primary worker reports quota exhaustion
-        │
-        └──► Start independent Qwen replacement
-
-Primary worker times out
-        │
-        ├──► Retry when browser remains healthy
-        └──► Replace only after retry policy is exhausted
-
-Task remains unresolved
-        │
-        └──► Escalate to ClaudeFallback results must record:the original provider;the reason for replacement;the replacement provider;whether the replacement is independent;whether quorum semantics changed.9. Observable by DefaultA failed run should be diagnosable from one trace.Recommended structured fields:{
-  "run_id": "run_20260630_001",
-  "phase": "P2",
-  "platform": "chatgpt",
-  "attempt": 2,
-  "browser_epoch": 4,
-  "page_lease_id": "lease_018",
-  "elapsed_ms": 18420,
-  "status": "failed",
-  "error_code": "BROWSER_DISCONNECTED"
-}Useful metrics include:total runs;successful and degraded runs;per-platform success rate;fallback frequency;quorum failures;generation latency;browser reconnect count;timeout count;empty-response count;arbitration failures.10. Security and PrivacyAgentChat controls already-authenticated browser sessions. Treat the browser profile as sensitive.Do not:commit browser profiles;export cookies into logs;print API keys;store full prompts indefinitely by default;expose the CDP endpoint to untrusted networks;connect to a CDP hostname without validating its resolved address;run untrusted prompts with unrestricted local file access.Recommended practices:bind CDP to 127.0.0.1;use a dedicated browser profile;redact secrets in structured logs;limit artifact retention;validate all configured endpoints;sanitize control characters before prompt injection;keep arbitration credentials separate from browser credentials.Adding a New Platform AdapterA platform adapter should implement the common adapter contract.from adapters.base import BaseAdapter
-from common import PlatformId
-
-
-class ExampleAdapter(BaseAdapter):
-    platform_id = PlatformId.EXAMPLE
-
-    async def probe(self) -> bool:
-        """Return whether the platform page is usable."""
-        ...
-
-    async def inject_prompt(self, prompt: str) -> None:
-        """Insert the prompt without submitting it multiple times."""
-        ...
-
-    async def trigger_send(self) -> None:
-        """Submit exactly once."""
-        ...
-
-    async def wait_for_completion(self) -> None:
-        """Wait until generation completes or the deadline expires."""
-        ...
-
-    async def extract_response(self) -> str:
-        """Return the complete assistant response."""
-        ...
-
-    async def cleanup(self) -> None:
-        """Restore the page to a reusable state."""
-        ...Then register it:from adapters.example import ExampleAdapter
-
-ADAPTER_REGISTRY["example"] = ExampleAdapterEvery new adapter should include tests for:empty responses;delayed rendering;partial streaming;duplicate submission prevention;changed DOM selectors;quota and authentication messages;generation timeout;tab crash;browser disconnect;cancellation during generation;cleanup idempotency.DevelopmentRun Testspytest -qRun reliability-focused tests:pytest -q \
-  tests/test_connection.py \
-  tests/test_heartbeat.py \
-  tests/test_error_propagation.pyRun with coverage:pytest \
-  --cov=. \
-  --cov-report=term-missing \
-  --cov-report=htmlStatic Checksruff check .
-mypy .Formatruff format .Debug LoggingAGENTCHAT_LOG_LEVEL=DEBUG \
-AGENTCHAT_LOG_FORMAT=json \
-python main.py "Diagnose this worker failure."Graceful InterruptionAgentChat should support interruption through Ctrl+C.Expected behavior:stop accepting new work;signal all active workers;cancel pending generation tasks;await cancelled tasks;release page leases;stop heartbeat supervisors;close owned resources;preserve externally managed Chrome sessions;return a meaningful process exit code.LimitationsAgentChat relies on Web LLM interfaces, which can change without notice.Potential limitations include:DOM selector drift;authentication expiration;provider-side rate limits;quota exhaustion;delayed or virtualized response rendering;incomplete extraction after UI changes;model availability differences between accounts;non-deterministic Extended Thinking behavior;increased latency in CONSENSUS mode;provider terms that may restrict certain automation patterns.Browser automation should be treated as a compatibility layer, not a stable public API.Before production use:review each platform's terms of service;validate adapters against the current UI;keep fallback paths tested;monitor extraction quality;inspect degraded results before relying on them.RoadmapTyped configuration schemaAdapter capability negotiationAutomatic selector-drift diagnosticsEvidence provenance scoringPersistent run replayWeb-based observability dashboardProvider-independent arbitration interfaceConfigurable perspective templatesDynamic worker selectionLocal-model evidence workersReproducible benchmark suiteAutomated chaos testing for browser failuresContributingContributions are welcome.Useful contribution areas include:new platform adapters;selector-resilience improvements;browser lifecycle fixes;structured error classification;timeout and cancellation tests;prompt-compression improvements;evidence quality evaluation;documentation and examples.Recommended workflow:git checkout -b feature/your-change
-pytest -q
-git commit -m "feat: describe your change"
-git push origin feature/your-changeWhen submitting a pull request, include:the problem being solved;affected platforms;failure behavior before the change;expected behavior after the change;tests covering the change;screenshots or sanitized logs when UI behavior is involved.LicenseThis project is distributed under the terms defined in the repository's LICENSE file.Third-party services, models, websites, and automation targets remain subject to their own licenses, usage policies, and terms of service.<p align="center">
-  <strong>AgentChat</strong><br>
-  Independent evidence. Explicit disagreement. Structured arbitration.
-</p><p align="center">
-  独立采集证据，显式保留分歧，统一完成仲裁。
-</p>
+│   ├── test_connection.py      # 连接与重连测试
+│   ├── test_heartbeat.py       # 健康检查测试
+│   ├── test_adapters.py        # 平台适配器测试
+│   ├── test_pipeline.py        # 多阶段管道测试
+│   └── test_orchestrator.py    # 端到端调度测试
+├── reference/
+│   └── platform-maturity.md    # 平台成熟度与兼容性记录
+├── scripts/
+│   └── start-chrome-debug.sh   # Chrome 调试模式启动脚本
+├── runs/                       # 结构化运行报告
+└── README.md验证数据AgentChat 已经过持续迭代验证，覆盖多模型调度、浏览器异常、超时恢复、结果裁决和降级链路。验证项目当前数据完整验证轮次20 轮以上独立任务评估100 次以上默认并发 Worker3 个支持的执行模式3 种主要免费网页模型3 个自动替补平台千问高难度兜底平台Claude最终裁决模型DeepSeek V4 Pro核心证据分区共识区、特色区、冲突区重点验证场景包括：Chrome CDP 首次连接失败。浏览器运行过程中断开。标签页崩溃或被用户关闭。Worker 生成超时。网页平台额度耗尽。页面结构变化导致选择器失效。返回空响应或不完整响应。多个 Worker 结论相互冲突。并发任务取消时的资源清理。连接恢复后的页面租约一致性。最少成功 Worker 数量不足。裁决接口超时或返回异常。用户通过 Ctrl+C 中断运行。长时间运行中的标签页轮换。结构化结果字段一致性。验证目标不是证明所有模型始终正确，而是确保系统在模型失败、网页变化、浏览器断线和观点冲突时仍能提供可解释、可恢复且可追踪的结果。许可证本项目采用 MIT ## 许可证。你可以自由使用、复制、修改、合并、发布和分发本项目，但必须保留原始版权声明和许可证声明。详细条款请参阅项目根目录中的 LICENSE 文件。
