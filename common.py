@@ -23,8 +23,8 @@ PAGE_LOAD_WAIT_MS     =  3_000   # post-navigation settle time
 SPA_WAKE_WAIT_MS      =  2_000   # after click-to-wake SPA
 EDITOR_READY_TIMEOUT_MS = 15_000  # editor visible wait
 INSERT_TEXT_LIMIT     = 50_000   # threshold: keyboard.insert_text vs clipboard
-RESPONSE_STABILITY_S  =     15   # seconds of no-growth before declaring done
-STABILITY_POLL_MS     =  2_000   # interval between stability checks
+RESPONSE_STABILITY_S  =      8   # seconds of no-growth before declaring done (was 15)
+STABILITY_POLL_MS     =  1_500   # interval between stability checks (was 2000)
 
 # ── CDP Security (P0 fixes 2026-06-28) ─────────────────────────────────────
 

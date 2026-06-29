@@ -287,13 +287,19 @@ class BaseAdapter:
             log.info("[%s] No prolonged generation phase", self.name)
 
         # Phase 2: toolbar = completion anchor
+        # P1 fix (2026-06-29): Cap toolbar wait at TOOLBAR_WAIT_CAP_MS (15s).
+        # Before this fix, `remaining` could be 500s+ for platforms whose
+        # TOOLBAR_SELECTOR never matches (e.g. Qianwen lacks .copy-btn),
+        # deadlocking the worker until the outer asyncio.wait() timeout.
+        # A toolbar either renders quickly after generation or never will.
+        TOOLBAR_WAIT_CAP_MS = 10_000  # 10s enough — toolbar renders fast or never
         try:
             toolbar = page.locator(self.TOOLBAR_SELECTOR).first
-            remaining = max(10_000, timeout_ms - int((time.time() - start) * 1000))
-            await toolbar.wait_for(state="visible", timeout=remaining)
+            await toolbar.wait_for(state="visible", timeout=TOOLBAR_WAIT_CAP_MS)
             log.info("[%s] Response toolbar detected", self.name)
         except Exception:
-            log.info("[%s] Toolbar not detected, stability fallback", self.name)
+            log.info("[%s] Toolbar not detected (%.1fs cap), stability fallback",
+                     self.name, TOOLBAR_WAIT_CAP_MS / 1000)
             last_len = 0
             last_change = time.time()
             while (time.time() - last_change) < RESPONSE_STABILITY_S:

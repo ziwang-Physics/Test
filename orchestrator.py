@@ -190,11 +190,21 @@ async def _p2_worker(adapter, prompt: str, results: dict,
                 log.info("[P2:%s] ♻ Reusing tab #%d (url: %s)", name,
                          _tab_use_count.get(name, 0) + 1,
                          page.url[:80] if page.url else "?")
+                # P1 fix (2026-06-29): navigate to base URL to clear draft state.
+                # Gemini auto-restores editor draft from previous conversation,
+                # which causes inject_prompt to append rather than replace.
+                # Navigating to the base URL resets the editor to empty.
+                try:
+                    await page.goto(adapter.URL, wait_until="domcontentloaded",
+                                    timeout=15_000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(3_000)
                 try:
                     await page.mouse.click(400, 400)
                 except Exception:
                     pass
-                await page.wait_for_timeout(1000)
+                await page.wait_for_timeout(500)
                 _record_use(name)
         else:
             # ── Fresh tab path (first run or rotation triggered) ──
@@ -256,6 +266,33 @@ async def _p2_worker(adapter, prompt: str, results: dict,
             )
 
         is_valid, reason = adapter.validate_response(cleaned, prompt)
+
+        # ── Gemini auto-retry: PROMPT_ECHO_DOMINANT means the reused tab
+        # has corrupted conversation state (Gemini echoes prompt without
+        # answering).  Close broken tab, open fresh, retry once.
+        if name == "Gemini" and reason == "PROMPT_ECHO_DOMINANT" and existing_page:
+            log.warning("[P2:%s] Echo detected — closing broken tab, retrying fresh", name)
+            try: await page.close()
+            except: pass
+            page = await adapter.connect(context=context)
+            await adapter.ensure_fresh_conversation(page)
+            try:
+                await adapter.ensure_thinking_mode(page)
+            except Exception as e:
+                log.warning("[P2:%s] ET retry failed: %s", name, e)
+            await adapter.ensure_ready(page)
+            await adapter.clear_input(page)
+            await adapter.inject_prompt(page, prompt)
+            await adapter.trigger_send(page)
+            try:
+                raw = await adapter.wait_response(page, timeout_ms=timeout_s * 1000)
+            except asyncio.TimeoutError:
+                raw = await _extract_partial_text(page, adapter)
+                truncated = True
+            cleaned = adapter.clean_response(raw, prompt)
+            is_valid, reason = adapter.validate_response(cleaned, prompt)
+            log.info("[P2:%s] Retry result: %d chars (%s)", name, len(cleaned), reason)
+
         p2_ok = BaseAdapter.is_pipeline_usable(is_valid, reason, len(cleaned))
 
         results[name] = {
@@ -366,12 +403,11 @@ async def phase2_dispatch(prompts: dict,
                           existing_page=existing_pages.get(name))
             )
 
-        # Wait for ALL workers to finish — no artificial deadline.
-        # Per-worker timeouts handle stuck tabs; outer wait blocks until
-        # every AI has completed generation (toolbar or stability confirmed).
+        # Wait for ALL workers — per-worker timeout handles stuck tabs.
+        # Outer timeout = per-worker + 60s buffer.  Must stay under bash limit.
         done, pending = await asyncio.wait(
             tasks.values(),
-            timeout=None,  # wait indefinitely — all AIs must finish
+            timeout=timeout_s + 60,
             return_when=asyncio.ALL_COMPLETED,
         )
 

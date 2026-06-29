@@ -68,10 +68,12 @@ class GeminiAdapter(BaseAdapter):
         'mat-spinner, [class*="spinner"]'
     )
 
-    # Model selector button aria-label pattern (2026-06-28 probe)
+    # Model selector button — MUST exclude fullscreen-toggle ("全螢幕輸入模式").
+    # The aria-label for the model picker contains the CURRENT model name
+    # (e.g. "Pro延長" or "Flash"), NOT the word "模式" alone.
     MODEL_SELECTOR_SEL = (
-        'button[aria-label*="模式"], button[aria-label*="Model"], '
-        'button[aria-label*="model"]'
+        'button[aria-label*="Pro"], button[aria-label*="Flash"], '
+        'button[aria-label*="Gemini"]'
     )
 
     # ── Thinking mode hook (delegates to ensure_pro_extended) ─────────────
@@ -88,6 +90,176 @@ class GeminiAdapter(BaseAdapter):
         except Exception as e:
             log.warning("[Gemini] ensure_thinking_mode failed: %s", e)
             return False
+
+    # ── Send (P1 fix 2026-06-29: Enter-primary + post-send verification) ──
+
+    async def clear_input(self, page) -> None:
+        """Gemini-specific clear: rich-textarea rejects fill(""), must use keyboard.
+
+        BaseAdapter.clear_input() tries editor.fill("") first which throws on
+        Gemini's <rich-textarea> custom element.  The exception fallback
+        (Ctrl+A + Backspace) is unreliable because Angular CDK may intercept
+        the keyboard shortcuts during a digest cycle.
+
+        This override uses triple-tap (click×3 → select all) + Backspace with
+        a post-clear verification to guarantee the editor is empty.
+        """
+        editor = page.locator(self.EDITOR_SELECTOR).first
+        await editor.focus()
+        await asyncio.sleep(0.2)
+
+        # Triple-click to select all text inside the rich-textarea.
+        # Playwright's click() with clickCount=3 triggers the native selection
+        # behavior that Angular CDK doesn't intercept.
+        await editor.click(click_count=3)
+        await asyncio.sleep(0.15)
+        await page.keyboard.press("Backspace")
+        await asyncio.sleep(0.3)
+
+        # Verify — if still not empty, use Escape then try again
+        remaining = await editor.evaluate(
+            "el => (el.textContent || el.innerText || '').trim().length"
+        )
+        if remaining > 5:
+            log.warning("[Gemini] Editor not cleared after triple-click (%d chars) — "
+                        "using Escape + retry", remaining)
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+            await editor.focus()
+            await asyncio.sleep(0.2)
+            await editor.click(click_count=3)
+            await asyncio.sleep(0.15)
+            await page.keyboard.press("Backspace")
+            await asyncio.sleep(0.3)
+            remaining = await editor.evaluate(
+                "el => (el.textContent || el.innerText || '').trim().length"
+            )
+            if remaining > 5:
+                log.warning("[Gemini] Editor STILL not empty (%d chars) — "
+                            "reloading page", remaining)
+                await page.goto(self.URL, wait_until="domcontentloaded",
+                                timeout=15_000)
+                await page.wait_for_timeout(3_000)
+        else:
+            log.info("[Gemini] Editor cleared")
+
+    async def inject_prompt(self, page, text: str) -> None:
+        """Gemini-specific prompt injection using keyboard.type() with delay.
+
+        BaseAdapter.inject_prompt() uses keyboard.insert_text() which pastes
+        all text at once WITHOUT triggering Angular change detection on the
+        rich-textarea component.  The text lands in the DOM but Angular never
+        sees it → send button stays hidden → trigger_send() click fails silently.
+
+        keyboard.type() with delay=8ms fires keydown/keypress/keyup for every
+        character, which Angular CDK hooks into, reliably showing the send button.
+        """
+        editor = page.locator(self.EDITOR_SELECTOR).first
+        await editor.focus()
+        await editor.click()
+        await asyncio.sleep(0.2)
+
+        # keyboard.type() with small delay triggers per-char Angular events.
+        # For long prompts (>1000 chars) this is slow but reliable.
+        # For very long prompts, use clipboard paste as fallback (which Gemini
+        # handles correctly via its own paste handler).
+        if len(text) > 1000:
+            log.info("[Gemini] Large prompt (%d chars) — clipboard paste + wake",
+                     len(text))
+            try:
+                await page.evaluate("(t) => navigator.clipboard.writeText(t)", text)
+            except Exception:
+                log.warning("[Gemini] Clipboard write failed, falling back to type")
+                await page.keyboard.type(text, delay=8)
+                await asyncio.sleep(0.3)
+                log.info("[Gemini] Prompt typed (%d chars)", len(text))
+                return
+            await page.keyboard.press("ControlOrMeta+v")
+            await page.wait_for_timeout(500)
+            # Wake: type+delete a character to trigger Angular change detection
+            # (needed after paste because paste events may not fire input events)
+            try:
+                await page.keyboard.type(".")
+                await page.keyboard.press("Backspace")
+                await page.wait_for_timeout(200)
+            except Exception:
+                pass
+        else:
+            await page.keyboard.type(text, delay=8)
+            await asyncio.sleep(0.5)
+
+        # Integrity check
+        injected = await editor.evaluate(
+            "el => (el.textContent || el.innerText || '').trim().length"
+        )
+        delta_pct = abs(injected - len(text)) / max(len(text), 1)
+        if delta_pct > 0.15:
+            log.warning("[Gemini] Payload mismatch: expected ~%d, got %d (%.1f%%)",
+                        len(text), injected, delta_pct * 100)
+
+        log.info("[Gemini] Prompt injected (%d chars)", len(text))
+
+    async def trigger_send(self, page) -> None:
+        """Gemini-specific send: Enter key primary, button click fallback.
+
+        On reused tabs the send button click can silently fail (Angular CDK
+        change detection on the Quill editor doesn't always register the
+        button event as a submission).  Enter key is more reliable for
+        rich-textarea because it triggers the native Quill keyboard handler.
+
+        Post-send verification: after sending, the editor should be empty
+        or a stop button should appear.  If neither, retry with Enter.
+        """
+        # ── Method 1: Enter key (primary — most reliable for Quill) ──
+        # P1 fix (2026-06-29): increased pre-Enter delay from 0.15s → 0.5s.
+        # After keyboard.type() finishes, Angular CDK zone.js change detection
+        # may still be processing the last keystrokes.  If Enter arrives during
+        # a digest cycle, it's swallowed silently → editor stays filled.
+        # 0.5s gives zone.js enough headroom to flush the microtask queue.
+        try:
+            editor = page.locator(self.EDITOR_SELECTOR).first
+            await editor.focus()
+            await asyncio.sleep(0.5)
+            await page.keyboard.press("Enter")
+            log.info("[Gemini] Sent via Enter key")
+        except Exception:
+            log.warning("[Gemini] Enter send failed, trying button")
+            try:
+                send_btn = page.locator(self.SEND_SELECTOR).first
+                await send_btn.wait_for(state="visible", timeout=3_000)
+                await send_btn.click()
+                log.info("[Gemini] Sent via button (Enter fallback)")
+            except Exception:
+                log.warning("[Gemini] Both Enter and button send failed")
+
+        # ── Post-send verification ──
+        await asyncio.sleep(1.5)
+        editor_cleared = False
+        try:
+            editor = page.locator(self.EDITOR_SELECTOR).first
+            remaining = await editor.evaluate(
+                "el => (el.textContent || el.innerText || '').trim().length"
+            )
+            if remaining < 20:
+                log.info("[Gemini] Send verified — editor cleared")
+                editor_cleared = True
+                return
+        except Exception:
+            remaining = -1
+
+        if not editor_cleared:
+            # Editor still has text — likely wasn't sent.  Retry once with Enter.
+            log.warning("[Gemini] Editor not cleared (%d chars remain) — retrying Enter",
+                        remaining)
+            try:
+                editor = page.locator(self.EDITOR_SELECTOR).first
+                await editor.focus()
+                await asyncio.sleep(0.5)
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(1.5)
+                log.info("[Gemini] Retry Enter sent")
+            except Exception as e:
+                log.error("[Gemini] Retry Enter failed: %s", e)
 
     # ── Fresh conversation ────────────────────────────────────────────────
 
@@ -332,28 +504,30 @@ class GeminiAdapter(BaseAdapter):
             log.info("[Gemini] Stop button never hidden or timed out")
 
         # Step 3: Wait for toolbar as definitive completion anchor.
-        # This is where Extended differs from normal: the toolbar is hidden
-        # for the ENTIRE thinking duration.  We wait with the full remaining
-        # timeout budget.
+        # P1 fix (2026-06-29): Cap thinking-phase wait at 90s. If stop button
+        # disappeared (thinking began) but toolbar doesn't appear within 90s,
+        # Gemini's backend is likely stuck (intermittent server-side issue
+        # where generation starts but never completes).  Don't waste the full
+        # timeout budget — extract partial content and let the orchestrator
+        # flag it as PROMPT_ECHO_DOMINANT / degraded.
+        THINKING_PHASE_CAP_MS = 90_000
         toolbar_found = False
         try:
             toolbar = page.locator(self.TOOLBAR_SELECTOR).first
-            remaining = max(30_000, timeout_ms - int((_time.time() - start) * 1000))
-            await toolbar.wait_for(state="visible", timeout=remaining)
+            await toolbar.wait_for(state="visible", timeout=THINKING_PHASE_CAP_MS)
             toolbar_found = True
             log.info("[Gemini] Toolbar detected — Extended Thinking complete")
         except Exception:
-            log.info("[Gemini] Toolbar timeout — extracting partial content")
+            log.info("[Gemini] Toolbar timeout after %.0fs — generation likely stuck",
+                     THINKING_PHASE_CAP_MS / 1000)
 
-        # Step 3.5: If toolbar never appeared, use dynamic stability check.
-        # P1 fix (2026-06-29): was fixed 10×3s=30s — far too short for Extended
-        # Thinking (30-300s).  Now scales with remaining timeout budget, capped
-        # at 120s to avoid wasting time on truly stuck generations.
+        # Step 3.5: If toolbar never appeared, generation is stuck.
+        # 30s stability check is enough to confirm stuck vs slow.
         if not toolbar_found:
-            max_stability_s = min(max(timeout_ms / 1000 * 0.5, 30), 120)
+            max_stability_s = 30
             poll_interval_s = 3.0
             max_checks = int(max_stability_s / poll_interval_s)
-            log.info("[Gemini] Dynamic stability check: up to %.0fs (%d checks)",
+            log.info("[Gemini] Post-stuck stability check: %.0fs (%d checks)",
                      max_stability_s, max_checks)
 
             last_len = 0
