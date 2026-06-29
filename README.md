@@ -1,244 +1,241 @@
-# AgentChat
+AgentChat面向 Web LLM 的并发证据采集、质量校验、故障恢复与独立裁决 Skill。AgentChat 不是一个让多个模型轮流发言的聊天界面。它将多个 Web LLM 视为相互独立、可能失败、可能冲突的证据源，通过浏览器并发采集答案，再交给独立裁决器完成评分、仲裁与合成。目录概述核心设计理念系统架构执行模式平台与角色稳健性设计快速开始配置说明使用方法输出格式项目结构开发与测试验证数据已知限制许可证概述AgentChat 是一条面向复杂问题的多智能体证据流水线。它通过 Chrome DevTools Protocol 连接本地持久化浏览器，使用 Playwright 驱动多个 AI 网站，并将不同平台的输出压缩为可审计的证据矩阵。项目的完整实现位于 skills/multiagent/，其中包含连接管理、浏览器心跳、页面租约、平台适配器、单元测试和契约测试。skills/multiagent-pipeline/ 保留为较轻量的兼容实现；本文档以 skills/multiagent/ 版本 0.2.0 为准。典型流程包含四个阶段：阶段名称职责P1问题分解提取不可变任务核心，为不同 Worker 生成差异化视角P2并发采集驱动 ChatGPT、千问、Gemini 并发回答并执行质量校验P3证据压缩整理共识、特色信息和冲突，形成结构化矩阵P4裁决合成将证据矩阵发送给 DeepSeek API，完成评分、仲裁与最终合成其中，orchestrator.py 直接实现 P2 和 P4；P1、P3、模式选择及提前退出策略由宿主 Agent 或 Skill 运行时负责。核心设计理念证据采集与最终判断分离Web Worker 只负责提供证据，不负责决定最终答案。即使某个平台输出得更长、更自信，也不会天然获得更高权重。最终裁决器需要根据证据完整性、逻辑质量、可验证性和平台间冲突独立判断。不可变任务核心每个 Worker Prompt 都应保留同一个 task_core，避免在视角分解过程中改变原问题。推荐 Prompt 组成：部分建议占比作用任务核心约 80%保证所有 Worker 回答同一个问题专属视角约 15%引导工程、研究或推理方向的差异交叉覆盖不超过 5%防止某个视角遗漏关键问题差异化并行，而不是重复投票默认 Worker 分工如下：ChatGPT：工程实践、实现细节、边界条件与可维护性千问：中文语境、系统化归纳、方案覆盖与替代路径Gemini：深层推理、反例、跨领域联系与长链分析这种分工不是永久绑定。Worker Prompt 中的任务核心必须一致，差异仅来自分析视角。Fire-and-Collect推荐入口不会要求所有 Worker 在同一个屏障后同时发送。每个 Worker 完成页面准备后即可独立提交，失败或超时不会阻塞其他 Worker。最终阶段按照实际获得的有效证据计算 Quorum，而不是等待最慢的平台。显式降级，而不是静默成功系统将 P2 结果划分为四级：状态含义healthy所有选定 Worker 均提供可进入 Quorum 的结果degraded至少两个 Worker 提供可用结果low_confidence仅有一个 Worker 提供可用结果failed没有获得可用证据调用方可以据此决定继续裁决、升级到共识模式，或停止输出。先提取，再清理，再验证平台回答不会被直接送入后续阶段。适配器统一执行：连接页面
+  → 建立新会话
+  → 等待编辑器可用
+  → 清空输入
+  → 注入 Prompt
+  → 等待完成
+  → 提取回答
+  → 清理界面噪声
+  → 校验质量质量校验会识别空响应、Prompt 回显、错误页、界面文本占比过高、DOM 变化和提取不完整等情况。系统架构                         ┌───────────────────────────┐
+                         │         用户问题          │
+                         └─────────────┬─────────────┘
+                                       │
+                                       ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ P1：问题分解                                                       │
+│                                                                    │
+│ task_core ─────────────────────────────────────────────────────┐   │
+│                                                               │   │
+│ worker_prompts                                                │   │
+│ ├─ chatgpt：工程实践 / 边界条件                                │   │
+│ ├─ qianwen：系统归纳 / 替代方案                                │   │
+│ └─ gemini：深层推理 / 反例                                     │   │
+└───────────────────────────────────┬────────────────────────────┘   │
+                                    │                                │
+                                    ▼                                │
+┌────────────────────────────────────────────────────────────────────┐
+│ P2：浏览器并发证据采集                                             │
+│                                                                    │
+│                    ConnectionManager                               │
+│                   浏览器生命周期唯一所有者                         │
+│                            │                                       │
+│              ┌─────────────┴─────────────┐                         │
+│              │ browser_epoch             │                         │
+│              │ PageLeaseRegistry         │                         │
+│              │ HeartbeatMonitor          │                         │
+│              └─────────────┬─────────────┘                         │
+│                            │                                       │
+│          ┌─────────────────┼─────────────────┐                     │
+│          ▼                 ▼                 ▼                     │
+│   ChatGPTAdapter     QianwenAdapter      GeminiAdapter             │
+│          │                 │                 │                     │
+│          └─────────────────┼─────────────────┘                     │
+│                            ▼                                       │
+│                 提取 → 清理 → 验证 → Quorum                       │
+└────────────────────────────┬───────────────────────────────────────┘
+                             │
+                             ▼
+┌────────────────────────────────────────────────────────────────────┐
+│ P3：自适应证据压缩                                                 │
+│                                                                    │
+│ ├─ 共识区：多个平台一致支持的结论                                  │
+│ ├─ 特色区：单个平台提供的高价值信息                                │
+│ └─ 冲突区：结论、事实、假设或优先级上的分歧                        │
+└────────────────────────────┬───────────────────────────────────────┘
+                             │
+                 ┌───────────┴───────────┐
+                 │ 满足提前退出条件？    │
+                 └──────┬─────────┬──────┘
+                        │是       │否
+                        ▼         ▼
+                 宿主直接合成     P4：DeepSeek API
+                                  评分 → 仲裁 → 合成
+                                         │
+                                         ▼
+                                  ┌──────────────┐
+                                  │   最终答案   │
+                                  └──────────────┘当前 orchestrator.py 的 P2 核心 Worker 为 ChatGPT、千问和 Gemini。它为浏览器断连、任务取消、部分提取、Quorum 计算和一次浏览器级恢复提供了统一路径。代码职责边界能力Skill 或宿主 Agentorchestrator.py判断任务难度是否选择 SIMPLE、PARALLEL、CONSENSUS是否生成差异化 Worker Prompt是否驱动 Web Worker否是页面质量校验否是计算 P2 Quorum否是构造共识、特色、冲突矩阵是否判断是否提前退出是否调用 DeepSeek 裁决否是执行模式模式只能单向升级：SIMPLE → PARALLEL → CONSENSUS不允许在同一次任务中从高成本模式退回低成本模式，以免丢失已经发现的风险或冲突。模式适用场景典型行为SIMPLE简单事实、低风险问答、无需多方证据宿主直接回答，或只调用一个 WorkerPARALLEL默认模式；工程分析、方案比较、代码审查三个核心 Worker 并发采集，随后压缩证据CONSENSUS高风险决策、平台严重冲突、低置信度结果增加备用 Worker、扩展验证，再执行强制裁决建议的提前退出条件：有效 Worker 数量 >= 2
+且主要结论形成共识
+且宿主评估置信度 >= 0.70
+且不存在未解决的高风险冲突提前退出属于 Skill 层策略，不是 orchestrator.py phase2 命令的自动行为。平台与角色核心 Worker平台适配器默认进入 P2主要能力ChatGPTChatGPTAdapter是工程分析、边界条件、实现建议千问QianwenAdapter是中文表达、系统归纳、替代方案GeminiGeminiAdapter是Extended Thinking、反例和长链推理Gemini 已拆分为编辑器控制、完成检测、响应提取、模式控制和协议定义等独立组件，降低单文件复杂度并方便 DOM 契约测试。备用与兼容平台平台适配器定位KimiKimiAdapter核心 Worker 不可用时的备用中文长文本平台ClaudeClaudeAdapter棘手问题的升级 Worker，需注意账户额度和限流DeepSeek WebDeepSeekAdapter兼容入口中的可选 Web Worker，与 P4 API 裁决器不是同一角色豆包_deprecated.py已弃用，依赖脆弱的界面选择器，仅适合手动实验完整适配器注册表位于 adapters/__init__.py。稳健性设计浏览器生命周期唯一所有者ConnectionManager 是 Playwright 和浏览器连接生命周期的唯一所有者。适配器、Worker 和心跳组件不得自行重连整个浏览器，从而避免多个协程同时重启连接、关闭新页面或覆盖状态。每次连接或重连都会生成新的 browser_epoch。旧 Epoch 中仍在运行的任务即使延迟返回，也不能操作新连接中的资源。页面租约PageLeaseRegistry 使用以下信息标识页面所有权：platform
+page object id
+run_id
+browser_epoch
+attempt
+generation页面关闭或复用前必须同时通过 Epoch 和 Generation 校验。这可以防止：旧 Worker 关闭新 Worker 已接管的页面心跳组件误删业务标签页两个 Worker 同时使用同一页面浏览器重连后旧任务继续写入共享状态心跳只报告故障HeartbeatMonitor 和 Tab Supervisor 只负责检测并发出信号，不直接执行浏览器重连、页面刷新或共享存储清理。默认检测策略：对象检测间隔单次超时连续失败阈值浏览器30 秒10 秒3 次页面15 秒10 秒2 次真正的恢复动作由 Orchestrator 和 ConnectionManager 协调完成。原生断连事件与慢速心跳竞速P2 同时监听：Playwright 原生 browser.on("disconnected")浏览器心跳故障信号Worker 聚合任务完成信号原生断连可以快速发现浏览器崩溃，心跳用于覆盖页面卡死或 CDP 无响应等场景。浏览器死亡时，系统会：取消旧 Epoch Worker
+  → 有界等待任务退出
+  → 停止旧心跳
+  → 原子重连浏览器
+  → 创建新 Epoch
+  → 重新执行 P2当前最多执行一次浏览器级恢复。熔断与新标签页重试每个平台拥有独立熔断器：连续失败两次后进入 OpenOpen 持续 30 秒之后进入 Half-OpenHalf-Open 只允许一个探测请求探测成功后恢复 Closed当响应因空文本、Prompt 回显、错误模式、DOM 改动或界面噪声而不可用时，Worker 可以在同一 Chrome 会话内打开新标签页重试一次。部分结果优先发生超时时，系统会尝试提取页面上已经生成的文本。只要部分文本达到最低可用标准，就会作为降级证据保留，而不是将整个平台结果直接丢弃。安全清理资源清理遵循以下规则：只关闭当前 Worker 持有有效租约的页面不清理共享 Cookie、Local Storage 或登录状态不因单个标签页失败而关闭整个浏览器保留健康页面供后续任务复用普通平台默认复用三次，Gemini 默认每次轮换页面快速开始环境要求依赖要求Python>=3.11,<3.15Playwright>=1.49,<1.52浏览器Chromium、Chrome 或兼容的 CDP 浏览器平台账户至少登录 ChatGPT、千问、GeminiDeepSeek API Key仅执行 P4 时需要操作系统启动脚本主要面向 Linux 或 macOS Bash 环境项目元数据声明 Python 3.11 至 3.14，并为异步 P4 调用提供可选的 httpx 依赖。1. 克隆仓库git clone https://github.com/ziwang-Physics/Test.git
+cd Test/skills/multiagent2. 创建虚拟环境python3.11 -m venv .venv
+source .venv/bin/activate
 
-**基于浏览器自动化并发调度多个网页大模型、采集多视角证据，并由统一裁决模型生成最终答案的多人工智能协作系统。**基于浏览器自动化并发调度多个网页大模型、采集多视角证据，并由统一裁决模型生成最终答案的多人工智能协作系统。    概述AgentChat 是一个基于浏览器自动化的多网页大模型证据采集与协作推理系统。它不是简单地把同一个问题发送给多个模型，也不是将多份回答直接拼接。AgentChat 会先拆解问题，再让不同模型从互补视角独立分析，随后压缩共识、差异与冲突，最后交由 DeepSeek V4 Pro API 完成评分、仲裁和答案合成。系统默认调度三个免费的网页人工智能服务：ChatGPT：侧重工程实践、实现路径、边界条件与可执行性。Kimi：侧重文献基准、资料覆盖、事实核验与背景补充。Gemini Pro Extended Thinking：侧重复杂推理、反例分析、长链路思考与深层约束。三个 Worker 通过 Chrome CDP 并发运行，不要求为每个网页模型配置独立接口密钥。最终结果由 DeepSeek V4 Pro API 统一裁决，避免简单投票造成的多数偏差。完整流程分为四个阶段：第一阶段：分析问题难度，并生成三个互补视角的提示词。第二阶段：通过 Chrome CDP 并发调度 ChatGPT、Kimi 和 Gemini。第三阶段：将多模型结果压缩为共识区、特色区和冲突区。第四阶段：由 DeepSeek V4 Pro API 评分、仲裁并生成最终答案。## 架构                              用户问题
-                                 │
-                                 ▼
-                    ┌────────────────────────┐
-                    │ 第一阶段：问题分析与拆解 │
-                    │ 难度判断、模式选择、提示词 │
-                    └───────────┬────────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              │                 │                 │
-              ▼                 ▼                 ▼
-    ┌────────────────┐ ┌────────────────┐ ┌────────────────────┐
-    │ ChatGPT Worker │ │  Kimi Worker   │ │   Gemini Worker    │
-    │ 工程实践视角    │ │ 文献基准视角    │ │ 深度推理视角        │
-    └───────┬────────┘ └───────┬────────┘ └─────────┬──────────┘
-            │                  │                    │
-            └──────────────────┼────────────────────┘
-                               │
-                       Chrome CDP 并发调度
-                               │
-                               ▼
-                    ┌────────────────────────┐
-                    │ 第三阶段：证据压缩矩阵   │
-                    │                        │
-                    │ - 共识区               │
-                    │ - 特色区               │
-                    │ - 冲突区               │
-                    └───────────┬────────────┘
-                                │
-                                ▼
-                    ┌────────────────────────┐
-                    │ DeepSeek V4 Pro API    │
-                    │ 评分、仲裁、冲突消解    │
-                    │ 最终答案合成            │
-                    └───────────┬────────────┘
-                                │
-                                ▼
-                             最终结果当主要 Worker 不可用时，系统会进入自动降级链：ChatGPT、Kimi 或 Gemini 不可用
-              │
-              ▼
-       自动切换千问深度思考
-              │
-              ▼
-      判断问题是否仍然存在高冲突
-              │
-       ┌──────┴──────┐
-       │             │
-       否            是
-       │             │
-       ▼             ▼
-  继续完成裁决    启动 Claude 兜底为什么选择 AgentChat多视角而非重复回答不同 Worker 使用不同任务提示词，分别承担工程实践、文献基准和推理深度职责，减少多个模型产生高度相似答案的问题。网页模型优先，降低使用成本ChatGPT、Kimi 和 Gemini 通过已登录的浏览器页面工作，不依赖三个独立的付费模型接口。并发采集，缩短等待时间三个 Worker 通过 Chrome CDP 同时运行，整体耗时接近最慢单个 Worker，而不是三个模型耗时之和。裁决而非简单投票DeepSeek V4 Pro 会结合证据质量、推理完整性、事实一致性和任务适配度进行评分，不会机械地选择多数意见。显式保留冲突系统会区分共识、独有发现和冲突结论。存在争议时，裁决器必须说明采用某一结论的原因。支持自动降级当网页模型额度耗尽、页面异常或生成失败时，系统可以切换到千问；面对高风险、高复杂度或高冲突任务时，可以进一步启动 Claude。面向长时间运行设计系统包含连接恢复、页面租约、超时控制、错误分类、Worker 隔离和安全清理机制，适合连续执行多轮任务。执行模式模式适用场景Worker 数量是否进行统一裁决特点PARALLEL默认模式，适用于绝大多数问题3是并发采集三个视角，在质量、速度和成本之间取得平衡SIMPLE极简单事实、短答案或无需争议分析的问题1按需跳过完整多模型流程，优先降低延迟CONSENSUS高风险、高冲突或需要更强证据一致性的问题3 个以上是扩大验证范围，必要时启动千问或 ClaudePARALLEL 模式PARALLEL 是默认模式，适用于超过九成的常规任务。执行过程：为三个 Worker 生成不同视角的提示词。并发采集 ChatGPT、Kimi 和 Gemini 的回答。提取共识、特色发现和冲突。交由 DeepSeek V4 Pro 完成最终裁决。SIMPLE 模式SIMPLE 用于答案明确、推理成本较低的问题，例如：简单定义。单一事实查询。短文本转换。不需要多视角验证的基础任务。该模式会减少 Worker 数量，并在证据充分时跳过复杂仲裁。CONSENSUS 模式CONSENSUS 用于以下任务：多个模型结论明显冲突。涉及复杂架构、关键决策或高风险判断。需要更严格的事实核验。单轮回答置信度不足。用户明确要求多模型共识。该模式会提高证据要求，并根据任务难度启动千问或 Claude 进行补充验证。Worker 角色Worker默认平台核心职责重点检查工程实践 WorkerChatGPT提供可执行方案、代码路径和工程判断可实现性、异常处理、性能、维护成本、边界条件文献基准 WorkerKimi补充资料、基准、背景与事实依据来源覆盖、术语准确性、行业基准、历史信息推理深度 WorkerGemini Pro Extended Thinking进行复杂推理、反例构造和约束分析隐含假设、逻辑漏洞、反例、长期影响、冲突解释替补 Worker千问深度思考在主要 Worker 不可用时接管任务回答完整性、推理连续性、可用性恢复高难度 WorkerClaude处理棘手问题和高冲突升级深层综合、复杂代码分析、长上下文一致性最终裁决器DeepSeek V4 Pro API评分、仲裁、冲突消解和答案合成证据权重、事实一致性、任务匹配度、最终可读性每个 Worker 都应独立完成任务，不能依赖其他 Worker 的中间结论。这样可以降低观点污染，并保留真正的模型差异。降级与兜底AgentChat 将网页模型异常分为额度、页面、网络、浏览器和内容五类，并根据错误类型选择不同的恢复策略。异常情况首选处理后续处理网页模型额度耗尽标记当前平台暂时不可用自动切换千问页面结构变化重新定位输入框和响应区域重建标签页并再次执行单个标签页崩溃释放当前页面租约创建新标签页重新运行对应 WorkerChrome CDP 暂时断开取消当前批次并清理任务重新连接浏览器后重跑当前阶段Worker 超时保留其他 Worker 的有效结果根据法定数量决定继续裁决或启动替补返回空内容重新提取并检查生成状态重新执行对应 Worker三个模型结论高度冲突切换到 CONSENSUS 模式启动 Claude 进行补充分析DeepSeek 裁决失败保留结构化证据矩阵使用备用裁决配置重试默认降级顺序：主要 Worker
-    │
-    ├─ 正常完成 ────────────────► 进入证据压缩
-    │
-    └─ 失败
-         │
-         ▼
-    同平台重试
-         │
-         ├─ 成功 ───────────────► 进入证据压缩
-         │
-         └─ 失败
-              │
-              ▼
-         千问深度思考替补
-              │
-              ├─ 证据充分 ──────► DeepSeek 裁决
-              │
-              └─ 仍有高冲突
-                   │
-                   ▼
-               Claude 兜底降级不会静默发生。最终结果中应记录：哪些 Worker 成功。哪些 Worker 失败。是否发生重试。是否启用替补平台。是否进入共识升级。最终裁决依据了哪些有效证据。快速开始环境要求Python 3.11 或更高版本。Google Chrome 或 Chromium。已安装 Playwright。Chrome 已登录需要使用的网页人工智能平台。可用的 DeepSeek V4 Pro API 密钥。Linux、macOS 或 Windows 环境。获取项目git clone https://github.com/你的账号/AgentChat.git
-cd AgentChat创建虚拟环境python -m venv .venv
-source .venv/bin/activateWindows PowerShell：.venv\Scripts\Activate.ps1安装依赖pip install -r requirements.txt
-playwright install chromium配置环境变量cp .env.example .env编辑 .env：DEEPSEEK_API_KEY=你的接口密钥
-CDP_ENDPOINT=http://127.0.0.1:9222
-DEFAULT_MODE=PARALLEL
-LOG_LEVEL=INFO启动 Chrome 调试端口Linux 或 macOS：google-chrome \
-  --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.agentchat-chrome"部分 Linux 环境中的命令可能是：chromium \
-  --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.agentchat-chrome"Windows PowerShell：& "C:\Program Files\Google\Chrome\Application\chrome.exe" `
-  --remote-debugging-port=9222 `
-  --user-data-dir="$env:USERPROFILE\.agentchat-chrome"Chrome 启动后，在该浏览器窗口中登录需要使用的平台：ChatGPT。Kimi。Gemini。千问。Claude。运行 AgentChatpython main.py "如何为一个多模型调度系统设计可靠的浏览器断线恢复机制？"指定执行模式：python main.py \
-  --mode PARALLEL \
-  "比较三种异步任务取消策略，并给出适合生产环境的方案。"配置说明AgentChat 支持通过环境变量和配置文件管理运行参数。敏感信息应放在 .env 中，调度策略应放在配置文件中。环境变量变量必填默认值说明DEEPSEEK_API_KEY是无DeepSeek V4 Pro API 密钥CDP_ENDPOINT否http://127.0.0.1:9222Chrome DevTools Protocol 地址DEFAULT_MODE否PARALLEL默认执行模式LOG_LEVEL否INFO日志级别MAX_RETRIES否2单个 Worker 的最大重试次数WORKER_TIMEOUT_SECONDS否300单个 Worker 的生成超时时间ARBITER_TIMEOUT_SECONDS否180最终裁决超时时间ENABLE_QIANWEN_FALLBACK否true是否启用千问替补ENABLE_CLAUDE_ESCALATION否true是否允许高难度任务启动 ClaudeMIN_SUCCESSFUL_WORKERS否2PARALLEL 模式进入裁决所需的最少成功 Worker 数量调度配置示例配置文件 config.yaml：运行模式:
-  默认模式: PARALLEL
-  自动升级共识模式: true
+python -m pip install --upgrade pip
+python -m pip install -e ".[async]"
+python -m playwright install chromium3. 启动持久化浏览器回到仓库根目录：cd ../..
 
-浏览器:
-  调试地址: http://127.0.0.1:9222
-  导航超时秒数: 60
-  单页最大复用次数: 10
-  断线自动重连: true
+PROXY_SERVER=http://127.0.0.1:7897 \
+bash scripts/start-chrome-debug.sh请将 PROXY_SERVER 替换为本机可访问的代理地址。启动器默认：只在 127.0.0.1 上开放 CDP使用端口 9222使用持久化配置目录 ~/.chrome-debug-profile生成权限受限的 CDP Token保留平台登录状态在浏览器异常退出时执行守护恢复然后导出 Token：export CHROME_CDP_TOKEN="$(
+  cat ~/.chrome-debug-profile/.cdp_token
+)"启动器及 CDP 安全检查会限制本地监听地址，并检查调试端口是否意外暴露到外部网络。4. 登录平台在启动的浏览器中手动登录：ChatGPT千问Gemini登录信息保存在持久化浏览器 Profile 中。不要将 Profile、Cookie 或 .cdp_token 提交到 Git。5. 创建 Worker Prompt进入完整实现目录：cd skills/multiagent
+mkdir -p .work创建 .work/prompts.json：{
+  "task_core": "评估一个异步 Python 服务的稳健性，并给出可执行的改进方案。",
+  "worker_prompts": {
+    "chatgpt": "围绕工程实现、异常传播、资源清理和并发安全分析。任务核心不得改变。",
+    "qianwen": "围绕系统设计、降级策略、可维护性和替代方案分析。任务核心不得改变。",
+    "gemini": "围绕深层因果、反例、极端边界和隐藏假设分析。任务核心不得改变。"
+  }
+}平台键必须使用规范小写名称：chatgpt
+qianwen
+gemini6. 执行 P2 并发采集python orchestrator.py phase2 \
+  --file .work/prompts.json \
+  --timeout 300 \
+  --json \
+  > .work/phase2.json虽然 P2 默认超时为 60 秒，但对于 Extended Thinking 或复杂工程问题，建议显式设置为 180 至 300 秒。7. 构造 P3 证据矩阵宿主 Agent 应读取 .work/phase2.json，将有效回答压缩为：# 共识区
 
-并发:
-  最大并发Worker数: 3
-  最少成功Worker数: 2
-  Worker超时秒数: 300
+- 多个平台共同支持的结论
+- 已得到交叉验证的事实
+- 一致认可的高优先级建议
 
-重试:
-  最大重试次数: 2
-  首次退避秒数: 2
-  最大退避秒数: 15
+# 特色区
 
-降级:
-  启用千问替补: true
-  启用Claude升级: true
-  高冲突阈值: 0.65
 
-裁决:
-  模型: deepseek-v4-pro
-  超时秒数: 180
-  输出冲突说明: true
-  输出证据摘要: true
+- 仅 ChatGPT 提出的高价值工程细节
 
-日志:
-  级别: INFO
-  结构化输出: true
-  保存运行报告: true
-  报告目录: runs模式选择规则模式选择:
-  SIMPLE:
-    最大预计复杂度: 低
-    是否需要多来源验证: false
 
-  PARALLEL:
-    最大预计复杂度: 高
-    是否需要多来源验证: true
+- 仅千问提出的系统化替代方案
 
-  CONSENSUS:
-    触发条件:
-      - 高风险任务
-      - 主要结论冲突
-      - 有效Worker少于预期
-      - 用户明确要求共识配置文件中的接口密钥、登录凭证和令牌不得提交到版本库。建议将以下内容加入 .gitignore：.env
-.venv/
-__pycache__/
-runs/
-logs/
-.agentchat-chrome/
-*.log使用示例默认并发模式python main.py \
-  "请审查一个基于 Playwright 的多标签页并发系统，重点检查竞态条件、资源泄漏和超时传播。"执行流程：ChatGPT 分析工程实现和错误处理。Kimi 查找相关基准与常见故障模式。Gemini 分析并发边界、反例和隐含假设。DeepSeek 对三个结果进行评分和统一裁决。极简模式python main.py \
-  --mode SIMPLE \
-  "什么是 Chrome CDP？"该模式适合不需要多模型交叉验证的简单问题。共识升级模式python main.py \
-  --mode CONSENSUS \
-  "在共享 BrowserContext 中并发运行多个 Worker 是否安全？请分析不同实现方案的风险。"该模式会提高证据要求，并在主要结论无法收敛时启动额外 Worker。从文件读取问题python main.py \
-  --input question.txt \
-  --mode PARALLEL输出结构化结果python main.py \
-  --mode PARALLEL \
-  --output result.json \
-  --format json \
-  "分析当前架构中可能导致静默数据损坏的路径。"结构化输出示例：{
-  "状态": "成功",
-  "## 执行模式": "PARALLEL",
-  "最终答案": "最终裁决后的完整答案",
-  "共识区": [
-    "三个 Worker 共同确认的结论"
-  ],
-  "特色区": {
-      "工程实现方面的独有发现"
-    ],
-      "文献或基准方面的独有发现"
-    ],
-    "Gemini": [
-      "复杂推理方面的独有发现"
-    ]
-  },
-  "冲突区": [
+## Gemini
+
+- 仅 Gemini 提出的反例、风险或深层推理
+
+# 冲突区
+
+- 冲突主题
+- 各平台观点
+- 证据依据
+- 尚未解决的问题建议根据估算 Token 数选择压缩策略：P2 总量P3 策略少于 64K Token可跳过深度压缩，仅统一格式64K 至 128K Token轻量去重和冲突提取不少于 128K Token完整共识、特色、冲突矩阵8. 执行 P4 裁决export DEEPSEEK_API_KEY="你的 API Key"
+
+python orchestrator.py phase4 \
+  --file .work/matrix.md \
+  --prompts-file .work/prompts.json \
+  --task-core "评估一个异步 Python 服务的稳健性，并给出可执行的改进方案。" \
+  > .work/final.mdP4 会将裁决规则放在独立的 System 消息中，并将 Worker 输出作为不可信证据数据传入，降低间接 Prompt Injection 改写裁决规则的风险。配置说明环境变量变量默认值是否必需说明CHROME_CDP_TOKEN无推荐CDP 连接认证 TokenDEEPSEEK_API_KEY无P4 必需DeepSeek 裁决 API KeyCDP_PORT9222否本地 Chrome 调试端口PROXY_SERVERhttp://127.0.0.1:7897否浏览器代理服务器HEADLESSfalse否是否以无头模式启动CHROME_PROFILE~/.chrome-debug-profile否持久化浏览器配置目录CHROMIUM_PATH自动检测否手动指定浏览器可执行文件运行时默认值配置项默认值P2 单平台超时60 秒main.py 单平台超时300 秒Worker 启动间隔1.5 秒熔断触发阈值连续失败 2 次熔断 Open 时间30 秒浏览器级恢复次数1 次普通页面最大复用次数3 次Gemini 页面最大复用次数1 次P4 请求超时120 秒P4 最大输出 Token4096单次响应提取上限约 500 KBP4 当前代码配置接口：
+https://api.deepseek.com/anthropic/v1/messages
+
+模型标识：
+deepseek-v4-pro该模型标识和兼容接口必须在你的账户中实际可用。若服务端配置不同，请同步修改 orchestrator.py。使用方法从标准输入执行 P2cat .work/prompts.json |
+python orchestrator.py phase2 \
+  --timeout 300 \
+  --json运行后关闭 Worker 标签页默认情况下，健康页面会被保留供后续任务复用。需要任务结束后关闭页面时：python orchestrator.py phase2 \
+  --file .work/prompts.json \
+  --timeout 300 \
+  --close-tabs \
+  --json只运行 P4cat .work/matrix.md |
+python orchestrator.py phase4 \
+  --task-core "原始任务核心"使用兼容并发入口main.py 可以让多个平台回答同一个 Prompt：python main.py \
+  --adapters chatgpt,qianwen,gemini \
+  --timeout 300 \
+  --json \
+  "请分析该系统的并发安全问题"查看适配器成熟度：python main.py --maturity默认适配器集合为：gemini,chatgpt,claude,kimi,qianwen,deepseek建议显式指定平台，避免无意触发未登录、额度不足或成熟度较低的适配器。main.py 默认使用发送屏障，让所有已就绪 Worker 尽量同时提交。关闭屏障：python main.py \
+  --no-barrier \
+  --adapters chatgpt,qianwen,gemini \
+  "你的问题"--no-barrier 只表示各 Worker 准备好后立即发送，任务本身仍然并发执行，并不等价于串行模式。对需要浏览器断连恢复、页面 Epoch、租约校验、心跳和 Quorum 的生产流程，应优先使用 orchestrator.py phase2。作为本地 Skill 安装mkdir -p ~/.claude/skills
+cp -R skills/multiagent ~/.claude/skills/multiagent安装后，宿主 Agent 可以读取 SKILL.md，负责模式选择、P1 Prompt 分解、P3 证据压缩和提前退出判断。输出格式P2 输出示例{
+  "success": true,
+  "quorum": "healthy",
+  "success_count": 3,
+  "timeout_count": 0,
+  "recovery_count": 0,
+  "results": [
     {
-      "主题": "存在分歧的问题",
-      "采用结论": "裁决器最终采用的结论",
-      "裁决理由": "证据权重和推理依据"
+      "platform": "chatgpt",
+      "success": true,
+      "quorum_eligible": true,
+      "response": "清理后的回答正文",
+      "length": 4280,
+      "timeout": false,
+      "error": "",
+      "quality": "OK"
+    },
+    {
+      "platform": "qianwen",
+      "success": true,
+      "quorum_eligible": true,
+      "response": "清理后的回答正文",
+      "length": 3612,
+      "timeout": false,
+      "error": "",
+      "quality": "OK"
+    },
+    {
+      "platform": "gemini",
+      "success": true,
+      "quorum_eligible": true,
+      "response": "清理后的回答正文",
+      "length": 5790,
+      "timeout": false,
+      "error": "",
+      "quality": "DEGRADED_BUT_USABLE"
     }
-  ],
-  "Worker状态": {
-    "ChatGPT": "成功",
-    "Kimi": "成功",
-    "Gemini": "成功"
-  },
-  "是否发生降级": false
-}作为 Python 模块调用import asyncio
-
-from agentchat import AgentChat
-from agentchat.models import ExecutionMode
-
-
-async def main() -> None:
-    client = AgentChat.from_config("config.yaml")
-
-    result = await client.run(
-        question="如何改进异步任务取消时的资源清理完整性？",
-        mode=ExecutionMode.PARALLEL,
-    )
-
-    print(result.final_answer)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())项目结构AgentChat/
-├── main.py                     # 命令行入口
-├── orchestrator.py             # 多阶段调度与执行模式控制
-├── connection.py               # Chrome CDP 连接与重连管理
-├── heartbeat.py                # 浏览器和标签页健康检查
-├── common.py                   # 公共数据结构、错误类型和工具函数
-├── config.yaml                 # 默认运行配置
-├── .env.example                # 环境变量示例
-├── requirements.txt            # Python 依赖
-├── adapters/
-│   ├── __init__.py             # 平台适配器注册
-│   ├── base.py                 # 适配器基础接口
-│   ├── chatgpt.py              # ChatGPT 网页适配器
-│   ├── kimi.py                 # Kimi 网页适配器
-│   ├── gemini.py               # Gemini 网页适配器
-│   ├── qianwen.py              # 千问替补适配器
-│   ├── claude.py               # Claude 高难度适配器
-│   ├── deepseek.py             # DeepSeek 裁决器
-│   └── components/
-│       ├── gemini_editor.py     # Gemini 输入与发送控制
-│       ├── gemini_completion.py # Gemini 完成状态检测
-│       ├── gemini_extraction.py # Gemini 响应提取
-│       └── gemini_mode.py       # Gemini 深度思考模式控制
-├── pipeline/
-│   ├── decomposition.py        # 问题拆解与视角提示词生成
-│   ├── collection.py           # 多 Worker 并发证据采集
-│   ├── compression.py          # 共识区、特色区和冲突区压缩
-│   └── arbitration.py          # 评分、仲裁和最终合成
-├── models/
-│   ├── result.py               # 统一结果结构
-│   ├── error.py                # 错误分类与错误传播模型
-│   └── worker.py               # Worker 状态与执行记录
-├── tests/
-│   ├── test_connection.py      # 连接与重连测试
-│   ├── test_heartbeat.py       # 健康检查测试
-│   ├── test_adapters.py        # 平台适配器测试
-│   ├── test_pipeline.py        # 多阶段管道测试
-│   └── test_orchestrator.py    # 端到端调度测试
-├── reference/
-│   └── platform-maturity.md    # 平台成熟度与兼容性记录
+  ]
+}success_count 表示可进入 Quorum 的结果数量，不只是适配器内部的布尔成功数量。当前可进入 Quorum 的质量状态包括：OK
+UI_CHROME_DOMINANT
+DEGRADED_BUT_USABLE单 Worker 字段字段类型说明platform字符串规范化平台名称success布尔值适配器是否获得可用文本quorum_eligible布尔值是否可以参与 Quorumresponse字符串清理后的回答length整数回答字符数timeout布尔值是否在超时后提取部分结果error字符串截断后的错误信息quality字符串响应质量分类实际 P2 返回结构由 phase2_dispatch() 统一生成。项目结构Test/
+├── README.md
+├── CHANGELOG.md
 ├── scripts/
-│   └── start-chrome-debug.sh   # Chrome 调试模式启动脚本
-├── runs/                       # 结构化运行报告
-└── README.md验证数据AgentChat 已经过持续迭代验证，覆盖多模型调度、浏览器异常、超时恢复、结果裁决和降级链路。验证项目当前数据完整验证轮次20 轮以上独立任务评估100 次以上默认并发 Worker3 个支持的执行模式3 种主要免费网页模型3 个自动替补平台千问高难度兜底平台Claude最终裁决模型DeepSeek V4 Pro核心证据分区共识区、特色区、冲突区重点验证场景包括：Chrome CDP 首次连接失败。浏览器运行过程中断开。标签页崩溃或被用户关闭。Worker 生成超时。网页平台额度耗尽。页面结构变化导致选择器失效。返回空响应或不完整响应。多个 Worker 结论相互冲突。并发任务取消时的资源清理。连接恢复后的页面租约一致性。最少成功 Worker 数量不足。裁决接口超时或返回异常。用户通过 Ctrl+C 中断运行。长时间运行中的标签页轮换。结构化结果字段一致性。验证目标不是证明所有模型始终正确，而是确保系统在模型失败、网页变化、浏览器断线和观点冲突时仍能提供可解释、可恢复且可追踪的结果。许可证本项目采用 MIT ## 许可证。你可以自由使用、复制、修改、合并、发布和分发本项目，但必须保留原始版权声明和许可证声明。详细条款请参阅项目根目录中的 LICENSE 文件。
+│   ├── start-chrome-debug.sh
+│   └── start-chrome-debug.py
+├── skills/
+│   ├── multiagent/
+│   │   ├── SKILL.md
+│   │   ├── pyproject.toml
+│   │   ├── requirements.txt
+│   │   ├── orchestrator.py
+│   │   ├── main.py
+│   │   ├── common.py
+│   │   ├── connection.py
+│   │   ├── heartbeat.py
+│   │   ├── adapters/
+│   │   │   ├── __init__.py
+│   │   │   ├── base.py
+│   │   │   ├── chatgpt.py
+│   │   │   ├── qianwen.py
+│   │   │   ├── gemini.py
+│   │   │   ├── kimi.py
+│   │   │   ├── claude.py
+│   │   │   ├── deepseek.py
+│   │   │   ├── _deprecated.py
+│   │   │   └── components/
+│   │   │       ├── protocols.py
+│   │   │       ├── gemini_editor.py
+│   │   │       ├── gemini_completion.py
+│   │   │       ├── gemini_extraction.py
+│   │   │       └── gemini_mode.py
+│   │   ├── tests/
+│   │   │   ├── unit/
+│   │   │   └── contracts/
+│   │   ├── reference/
+│   │   └── .github/
+│   │       └── workflows/
+│   │           └── ci.yml
+│   └── multiagent-pipeline/
+│       └── 兼容实现
+└── loop_results/
+    └── SUMMARY.md核心文件说明：文件职责SKILL.mdSkill 层工作流、模式和 Prompt 规范orchestrator.py推荐入口；执行 P2 和 P4main.py多平台同题并发兼容入口common.py公共常量、错误类型、结果结构、日志和屏障connection.pyPlaywright 生命周期、重连、Epoch 和页面租约heartbeat.py浏览器与页面故障检测adapters/base.py注入、等待、提取、清理、验证的统一管线adapters/各平台 DOM 自动化实现tests/unit/生命周期、公共组件和边界逻辑测试tests/contracts/平台 DOM 选择器和适配器契约测试仓库当前完整实现的目录结构及适配器文件以 skills/multiagent/ 为准。开发与测试安装开发依赖cd skills/multiagent
+python -m pip install -e ".[dev]"运行单元测试pytest tests/unit/ -v运行适配器契约测试pytest tests/contracts/ -v运行静态检查ruff check .
+ruff format --check .
+mypy --ignore-missing-imports .包目录中提供了 CI 配置模板，覆盖：Python 3.11、3.12、3.13 的 Ruff 和 MyPyPython 3.11、3.12、3.13 的单元测试Python 3.12 的适配器契约测试工作日定时 E2E Smoke 入口注意：GitHub 只自动识别仓库根目录下的 .github/workflows/。当前工作流位于 skills/multiagent/.github/workflows/；如需启用 GitHub Actions，应将其移动到仓库根目录，并同步修正工作目录。当前可见测试树包含 unit/ 和 contracts/。CI 中预留的 tests/e2e/ 任务需要在补充相应测试后再启用。验证数据仓库中的 loop_results/SUMMARY.md 记录了 30 轮浏览器采集验证：指标结果验证轮次30验证平台ChatGPT、千问每轮成功情况30 轮均为 2/2Worker 成功执行数60/60总采集字符数199,118ChatGPT 总字符数133,095ChatGPT 平均字符数4,436千问总字符数66,023千问平均字符数2,200这些数据证明了特定环境下 ChatGPT 与千问双 Worker 的连续采集能力，但不应被解读为完整生产可用性指标。当前验证记录尚未完整覆盖：Gemini 三 Worker Quorum浏览器崩溃后的自动恢复Circuit Breaker Half-Open 探测长时间运行时的页面轮换P3 证据压缩质量P4 裁决正确率平台 DOM 大版本更新不同网络、账户和地区环境已知限制Web DOM 不是稳定 API平台界面可能随时调整：编辑器选择器发送按钮停止生成按钮Thinking 状态回答容器错误提示登录与额度弹窗适配器已提供多级选择器和通用回退，但无法保证在平台更新后始终可用。依赖本地账户状态项目复用本地浏览器登录态，不会代替用户注册、登录或绕过平台限制。实际可用性受以下因素影响：账户套餐地区限制每日额度并发限制验证码风控策略平台服务条款P1 和 P3 不是独立 CLI 阶段orchestrator.py 目前只直接提供：phase2
+phase4P1 Prompt 分解和 P3 证据压缩依赖宿主 Agent 按照 SKILL.md 执行。仅运行 CLI 不等于执行完整四阶段流水线。main.py 是兼容入口main.py 适合快速获得多个平台对同一 Prompt 的回答，但它不具备推荐 Orchestrator 的全部能力，例如：Browser Epoch 恢复页面租约校验浏览器心跳竞速Quorum 分级浏览器死亡后整轮重跑P4 失败不会自动伪造答案当 DEEPSEEK_API_KEY 缺失、接口超时或服务端返回错误时，P4 返回空结果并记录错误。调用方应保留 P3 矩阵，并选择：重试 API更换裁决器由宿主 Agent 基于矩阵合成明确向用户报告裁决失败当前仍处于 Alpha版本元数据将项目标记为 Alpha。对于医疗、法律、金融、安全响应或其他高风险决策，不应在缺少人工复核的情况下直接采用最终输出。许可证skills/multiagent/pyproject.toml 当前声明使用 MIT 许可证。MIT License仓库根目录当前未见独立的 LICENSE 文件。为消除分发和贡献授权上的歧义，正式发布前应在仓库根目录补充完整的 MIT License 文本。
