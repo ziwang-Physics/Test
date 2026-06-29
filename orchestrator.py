@@ -676,14 +676,19 @@ async def _p2_worker(adapter, prompt: str, results: dict,
             try:
                 partial = await _extract_partial_text(page, adapter)
             except Exception:
-                pass
+                partial = ""
         cb.failure()
+        # P0 fix (R1 ChatGPT): exception path NEVER produces success=True.
+        # Old code used bool(partial and len(partial) > 20) — any page text
+        # (login screens, error pages, navigation) could become a "successful"
+        # answer.  Partial text is saved for diagnostics only.
         results[name] = {
             "platform": name,
-            "success": bool(partial and len(partial) > 20),
+            "success": False,
             "response": partial, "length": len(partial),
             "timeout": False, "error": str(e)[:200],
-            "quality": "EXCEPTION_RECOVERED" if partial else "FATAL",
+            "quality": "FATAL",
+            "quorum_eligible": False,
         }
     finally:
         # P1 fix: only keep alive if healthy AND lease is still valid
@@ -880,7 +885,10 @@ async def phase2_dispatch(prompts: dict,
             # thinking_verified for platforms that need it.  Old code counted
             # workers with failed thinking mode as quorum-eligible if their
             # text happened to pass quality checks.
-            _QUORUM_QUALITIES = {"OK", "UI_CHROME_DOMINANT", "DEGRADED_BUT_USABLE"}
+            # P0 fix (R1 ChatGPT): UI_CHROME_DOMINANT removed from quorum.
+            # Its name literally says the response is mostly UI navigation text.
+            # DEGRADED_BUT_USABLE kept as low-weight supplementary evidence.
+            _QUORUM_QUALITIES = {"OK", "DEGRADED_BUT_USABLE"}
             worker_list = []
             for _adapter, _prompt, name in selected:
                 r = results.get(name, {})
