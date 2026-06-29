@@ -384,11 +384,12 @@ def _find_existing_tab(context, platform: str):
 async def _extract_partial_text(page, adapter) -> str:
     """Extract whatever response text exists right now.
 
-    P1 fix (2026-06-29): try adapter strategies FIRST (even on partial DOM),
-    only fall back to body.textContent as last resort.  Add [TRUNCATED] marker
-    on every truncation path so upstream code knows the content is incomplete.
+    P0 fix (R1 ChatGPT): body.textContent is NEVER a valid answer.
+    Login screens, error pages, navigation, and old history all live in
+    document.body.  Returning any of them as a "response" would inject
+    garbage into the evidence pipeline.  Now only uses adapter strategies.
     """
-    # Strategy 1: use the adapter's multi-strategy extraction (handles partial DOM)
+    # Strategy 1: use the adapter's multi-strategy extraction
     try:
         text = await adapter.extract_response(page)
         if text and len(text) > 5:
@@ -396,16 +397,18 @@ async def _extract_partial_text(page, adapter) -> str:
     except Exception:
         pass
 
-    # Strategy 2: body.textContent as ultimate fallback
+    # Strategy 2: save page body for diagnostics only, NEVER return as answer
     try:
-        text = await page.evaluate(
-            "() => document.body.textContent || document.body.innerText || ''"
+        raw_body = await page.evaluate(
+            "() => (document.body.textContent || '').slice(0, 5000)"
         )
-        if text:
-            return text[:50000] + ("\n[TRUNCATED]" if len(text) > 50000 else "")
-        return ""
+        if raw_body:
+            log.warning("[P2] No adapter extraction — page body saved for diagnostics "
+                       "(not returned as answer): %s...", raw_body[:100])
     except Exception:
-        return ""
+        pass
+
+    return ""
 
 
 # ── Phase 2 Worker (P1: fire-and-collect — no Barrier) ───────────────────
