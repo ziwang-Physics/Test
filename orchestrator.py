@@ -35,13 +35,13 @@ P2_DEFAULT_TIMEOUT = 60
 
 P2_CLASSES = {
     "chatgpt":  ChatGPTAdapter,
-    "qianwen":  QianwenAdapter,   # 千问 Qwen3.7-Max Deep Thinking — faster than Kimi
-    "gemini":   GeminiAdapter,
+    "qianwen":  QianwenAdapter,
+    # Gemini removed per user request — unreliable extraction (0 chars ~40% of rounds)
 }
-# Kimi kept as spare (slow thinking, but good search). Claude for CONSENSUS escalation.
 _P2_SPARE = {
-    "kimi":    KimiAdapter,
-    "claude":  ClaudeAdapter,
+    "gemini":   GeminiAdapter,
+    "kimi":     KimiAdapter,
+    "claude":   ClaudeAdapter,
 }
 
 # ── DeepSeek API configuration (P4 adjudicator) ──────────────────────────
@@ -65,12 +65,15 @@ _TAB_URL_MAP = {
 # Session rotation: after N reuses, close the tab and open a fresh one
 # to prevent context-window bloat and keep responses sharp.
 MAX_TAB_REUSE = 3
+# Gemini tab degrades quickly — force fresh every round.
+GEMINI_MAX_REUSE = 1
 _tab_use_count: dict[str, int] = {}  # platform → consecutive reuses
 
 
 def _should_rotate(platform: str) -> bool:
-    """Return True if the tab for *platform* has exceeded MAX_TAB_REUSE."""
-    return _tab_use_count.get(platform, 0) >= MAX_TAB_REUSE
+    """Return True if the tab for *platform* has exceeded its reuse limit."""
+    limit = GEMINI_MAX_REUSE if platform == "Gemini" else MAX_TAB_REUSE
+    return _tab_use_count.get(platform, 0) >= limit
 
 
 def _record_use(platform: str) -> None:
