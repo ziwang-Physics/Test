@@ -267,19 +267,21 @@ async def _p2_worker(adapter, prompt: str, results: dict,
 
         is_valid, reason = adapter.validate_response(cleaned, prompt)
 
-        # ── Gemini auto-retry: PROMPT_ECHO_DOMINANT means the reused tab
-        # has corrupted conversation state (Gemini echoes prompt without
-        # answering).  Close broken tab, open fresh, retry once.
-        if name == "Gemini" and reason == "PROMPT_ECHO_DOMINANT" and existing_page:
-            log.warning("[P2:%s] Echo detected — closing broken tab, retrying fresh", name)
+        # ── Auto-retry: if ANY platform's page errored (EMPTY, ECHO, FATAL),
+        # close ONLY that dead tab, open a fresh one in the SAME Chrome,
+        # re-inject prompt, retry ONCE.  Other tabs are unaffected.
+        _RETRY_REASONS = {"EMPTY_OR_TOO_SHORT", "PROMPT_ECHO_DOMINANT", "FATAL"}
+        if reason in _RETRY_REASONS:
+            log.warning("[P2:%s] %s — closing dead tab, retrying fresh (same Chrome)", name, reason)
             try: await page.close()
             except: pass
             page = await adapter.connect(context=context)
             await adapter.ensure_fresh_conversation(page)
-            try:
-                await adapter.ensure_thinking_mode(page)
-            except Exception as e:
-                log.warning("[P2:%s] ET retry failed: %s", name, e)
+            if name == "Gemini":
+                try:
+                    await adapter.ensure_thinking_mode(page)
+                except Exception as e:
+                    log.warning("[P2:%s] ET retry failed: %s", name, e)
             await adapter.ensure_ready(page)
             await adapter.clear_input(page)
             await adapter.inject_prompt(page, prompt)
