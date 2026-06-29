@@ -1,3 +1,13 @@
 __pycache__/
 *.pyc
-/tmp/
+*.pyo
+.env
+.env.*
+!.env.example
+*.log
+.chrome-debug-profile/
+.pytest_cache/
+*.sqlite*
+dist/
+build/
+*.egg-info/
