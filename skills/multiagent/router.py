@@ -249,12 +249,19 @@ def build_serial_prompt(task: str, plan: RoutePlan, platform: str,
 
 async def _dispatch_one(platform: str, adapter_cls, prompt: str,
                         timeout_s: int, keep_alive: bool) -> dict[str, Any]:
-    """Run exactly one platform through phase2_dispatch."""
+    """Run exactly one platform through phase2_dispatch.
+
+    P0 fix (R5): pass worker_classes so phase2_dispatch uses the correct
+    adapter.  Old code omitted this — serial chain and fallback pool
+    (Claude, Qwen, MiniMax, Doubao) would silently dispatch Kimi+Gemini+ChatGPT
+    instead, getting empty results for non-default platforms.
+    """
     from orchestrator import phase2_dispatch
     batch = await phase2_dispatch(
         prompts={platform: prompt},
         timeout_s=timeout_s,
         keep_alive=keep_alive,
+        worker_classes={platform: adapter_cls},
     )
     results = batch.get("results") or []
     if results:
