@@ -1,8 +1,44 @@
 # MultiAgent: 3-Mode DAG Pipeline + DeepSeek One-Shot Judge
 
-> **最后更新**: 2026-06-28 — CONSENSUS One-Shot Judge + Condorcet 门控 + 选择性备选激活
-> **模型**: Claude Code (powered by DeepSeek LLM, local inference — no web browser needed for P1/P3)
-> **验证**: 20+ 轮 loop 迭代，100+ 次独立专家评估，完全收敛
+> **最后更新**: 2026-07-01 — 决策分工与能力边界文档化
+> **验证**: 20+ 轮 loop 迭代，100+ 次独立专家评估，30 轮 ChatGPT+Gemini 对抗审查
+
+---
+
+## 决策分工与能力边界（CRITICAL）
+
+整个系统由三类角色协作完成，各自的能力边界和决策权限必须严格区分：
+
+### 角色分工
+
+| 角色 | 运行环境 | 能做什么 | 不能做什么 |
+|------|---------|---------|-----------|
+| **Claude Code (本地)** | 用户机器，有文件系统+Shell | 读写本地文件、编译运行代码、操控 Chrome 浏览器、提交 Git、推送代码 | 无法独立判断代码逻辑是否正确（需要 Web AI 审查） |
+| **Web AI (ChatGPT/Gemini)** | 浏览器云端，只能通过网页交互 | 访问 GitHub 仓库阅读代码、搜索网页获取最新资料、分析代码逻辑、找出 bug、提出改进方案 | **看不到本地文件**、看不到运行中进程、看不到浏览器操控日志、不能执行代码、不能修改文件 |
+| **DeepSeek API (P4 裁决)** | API 调用 | 单次评分、冲突仲裁、证据合成 | 无浏览器、无文件系统 |
+
+### 核心原则
+
+1. **Web AI 是"代码审查员"，不是"执行者"**：ChatGPT 和 Gemini 只负责阅读 GitHub 上的代码、找出问题、提出改进方案。它们不能修改任何文件。
+2. **Claude Code 是"执行者"，不是"决策者"**：Claude Code 负责把 Web AI 的审查意见落地为代码修改、编译验证、提交推送。不应自行决定修改方向。
+3. **每一轮对话前，Claude Code 必须将上一轮遇到的问题（浏览器操控失败、模式切换失败、响应为空、超时等）如实告知 Web AI**。Web AI 只有在了解实际运行情况后才能精准诊断。
+4. **GitHub 是唯一的信息桥梁**：Web AI 只能通过 GitHub 仓库看到代码。每次修改后必须立即推送，否则 Web AI 看到的是过时代码。
+5. **迭代闭环**：Web AI 审查 → Claude Code 实施修复 → Push 到 GitHub → 下一轮 Web AI 看到新代码+上一轮问题 → 继续审查。不可跳过任何一步。
+
+### 一轮完整的协作流程
+
+```
+1. Claude Code 把本轮审查焦点 + 上一轮遇到的浏览器问题 → 写成 prompt
+2. Prompt 通过 Chrome CDP 注入到 ChatGPT 和 Gemini 网页
+3. ChatGPT/Gemini 访问 GitHub 阅读代码，搜索网页，给出审查报告
+4. Claude Code 提取审查报告中的关键发现
+5. Claude Code 实施最优先的修复 → 编译验证
+6. Git commit + push 到 GitHub（让下一轮 Web AI 看到最新代码）
+7. 记录本轮遇到的问题（模式失败、超时、崩溃等）→ 传给下一轮 prompt
+8. 重复 1-7
+```
+
+---
 
 ## Prerequisites
 
