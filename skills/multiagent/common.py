@@ -388,7 +388,7 @@ def verify_cdp_safe(port: str = "9222") -> tuple[bool, str]:
         except Exception:
             pass  # Can't determine external IP — skip external check
         s.close()
-        return True, f"CDP safe — localhost only (resolved: {loopback_ips})"
+        return True, f"CDP safe — localhost only (resolved: {sorted(all_ips)})"
     except (socket.timeout, ConnectionRefusedError, OSError) as e:
         return False, f"CDP TCP check failed (Chrome not running?): {e}"
 

@@ -64,7 +64,9 @@ class GeminiAdapter(BaseAdapter):
     )
     MODEL_SELECTOR_SEL = (
         'button[aria-label*="Pro"], button[aria-label*="Flash"], '
-        'button[aria-label*="Gemini"]'
+        'button[aria-label*="Gemini"], '
+        'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], '
+        'button[aria-label*="模式选择器"]'
     )
 
     def __init__(self, cdp_port: str = "9222"):

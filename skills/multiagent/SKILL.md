@@ -80,11 +80,13 @@ R5-R9: 稳定产出 3000-5000 字符 ✅
 
 ### 已知待修复（优先级排序）
 
-1. **DOM 静默检测 → UI 状态机**：Extended Thinking 期间用停止按钮/工具栏替代纯文本长度防抖
-2. **Deadline monotonic 时钟**：`time.time()` → `time.monotonic()`，接入关键路径
-3. **页面替换原子化**：`_replace_page()` 统一迁移 lease + heartbeat
-4. **quorum 语义严格化**：分离 transport_completed / validated / quorum_met
-5. **P4 结构化返回**：不再返回空字符串表示所有失败
+> 状态核对于 R13 (2026-06-30)，对照实际代码：
+
+1. ✅ **DOM 静默检测 → UI 状态机**：已在 `adapters/components/gemini_completion.py` 落地 SENDING→GENERATING→THINKING→COMPLETE 状态机（toolbar 锚点，R10/R12）。通用 `base.wait_response` 仍用文本长度防抖。
+2. ✅ **Deadline monotonic 时钟**：`common.Deadline` 已用 `loop.time()` 单调钟并接入 `_p2_worker`。⚠️ `phase2_dispatch` 外层 `asyncio.wait(timeout=timeout_s+60)` 仍用裸相对值，未走 Deadline。
+3. ⏸️ **tab 复用：管线已通，但已禁用（R15 真机 smoke test 发现）**：lease/heartbeat/retry 迁移的底层改动（`_lease_and_monitor`、retry 时迁移 lease+heartbeat、`_p2_worker` 各 page 分支统一获取 lease）**已生效**，覆盖 always-fresh 路径。但 `phase2_dispatch` 传 `existing_page=_find_existing_tab(...)` 那行**已回退**——真机测试发现复用 ChatGPT 对话 tab 时，导航到 base URL 不会真正开新对话，fallback 提取器抓到用户自己的 prompt 气泡（`你说：<prompt>`）→ 每次复用都 `PROMPT_ECHO_DOMINANT`，retry 的 fresh tab 也失败；fresh tab 稳定。**复用代码保留在 `_p2_worker`**（正确但未激活），等 ChatGPT adapter 学会复用时点「新对话」、并把 `RESPONSE_STRATEGIES` 收紧到 assistant 角色后再开启。`_replace_page()` 仍未单独编写（轮换路径已覆盖其意图）。
+4. **quorum 语义严格化**：分离 transport_completed / validated / quorum_met（仍待办）。（R13 已修：`run_parallel_route` 的 quorum 不再被 fallback 成功虚高。）
+5. **P4 结构化返回**：`phase4_adjudicate` 仍用空字符串表示所有失败（仍待办）。（R13 已修：P4 的 indirect-prompt-injection 缓解从"文档声称、代码未生效"改为真正生效——judge 规则在 `system`、evidence 以 `<evidence>` JSON 进入 user 消息。）
 
 ---
 
@@ -306,26 +308,31 @@ python3 orchestrator.py phase4 --file matrix.md --prompts-file prompts.json
 ## File Structure
 
 ```
-~/.claude/skills/multiagent/
-├── SKILL.md                  # This file (workflow)
-├── common.py                 # Shared: cdp_url(), AbortableBarrier, setup_logging()
-├── orchestrator.py           # Phase 2 + Phase 4 browser automation
-├── main.py                   # Standalone 7-platform controller (backward compat)
-├── adapters.py.bak           # Pre-optimization monolithic file (kept for reference)
-├── requirements.txt          # playwright>=1.45
-├── adapters/                 # Per-platform adapter package
-│   ├── __init__.py           # Registry + exports
-│   ├── base.py               # BaseAdapter (connect/inject/extract/validate)
-│   ├── chatgpt.py            # ChatGPTAdapter (P2 worker: 工程实践+搜索)
-│   ├── qianwen.py            # QianwenAdapter (P2 worker: 安全防御+搜索)
-│   ├── gemini.py             # GeminiAdapter (P2 worker: 推理深度+搜索 + P4 fallback)
-│   ├── kimi.py               # KimiAdapter (备用 — 思考太慢)
-│   ├── claude.py             # ClaudeAdapter (首选备选 — CONSENSUS升级时选择性激活)
-│   ├── qianwen.py            # QianwenAdapter (P2 worker: 安全防御+搜索)
-│   ├── deepseek.py           # DeepSeekAdapter (Expert + Deep Think)
-│   └── _deprecated.py        # DoubaoAdapter (manual opt-in only)
-└── reference/
-    └── platform-maturity.md  # Platform maturity levels + adapter details
+~/.claude/skills/multiagent/             # skill root (git repo)
+├── SKILL.md                             # symlink → skills/multiagent/SKILL.md (this doc)
+├── README.md  CHANGELOG.md              # user + change docs
+├── scripts/                             # connect-gemini.sh, start-chrome-debug.{sh,py}
+└── skills/multiagent/                   # ← all Python code lives here (cd here to run)
+    ├── SKILL.md                         # the real workflow doc
+    ├── common.py                        # PlatformId, Deadline, AbortableBarrier, cdp_url, ErrorInfo, setup_logging
+    ├── connection.py                    # ConnectionManager (browser_epoch) + PageLeaseRegistry
+    ├── heartbeat.py                     # HeartbeatMonitor / BrowserSupervisor / TabSupervisor
+    ├── router.py                        # decompose_and_route + parallel/serial pipeline (run_pipeline)
+    ├── orchestrator.py                  # phase2_dispatch + phase4_adjudicate + CLI
+    ├── main.py                          # Legacy standalone multi-platform controller (--route delegates to router)
+    ├── adapters.py.bak                  # Pre-modularization monolith (reference only)
+    ├── pyproject.toml  requirements.txt # pytest config / playwright>=1.45
+    ├── adapters/                        # Per-platform adapter package
+    │   ├── __init__.py                  # ADAPTER_REGISTRY + PLATFORM_MATURITY
+    │   ├── base.py                      # BaseAdapter (connect/inject/extract/validate)
+    │   ├── chatgpt.py  claude.py  gemini.py  kimi.py  qianwen.py
+    │   ├── deepseek.py  minimax.py  doubao.py
+    │   ├── _deprecated.py               # legacy DoubaoAdapter (manual opt-in)
+    │   └── components/                  # Protocol-based Gemini drivers
+    │       ├── protocols.py  gemini_editor.py  gemini_completion.py
+    │       └── gemini_extraction.py  gemini_mode.py
+    ├── reference/platform-maturity.md   # Platform maturity levels + adapter details
+    └── tests/  (contracts/  unit/)      # adapter-contract + platform-id / circuit-breaker tests
 ```
 
 ## P0 Fixes Applied (2026-06-28)

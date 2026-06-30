@@ -203,7 +203,7 @@ async def main():
 
     log.info("MultiAgent: %d platforms | prompt=%d chars", len(selected), len(prompt))
     log.info("Barrier: %s",
-             "OFF" if args.no_barrier
+             "OFF" if args.no_send_barrier
              else f"ON (AbortableBarrier({len(selected)}) simultaneous send)")
     for adp in selected:
         log.info("  %-10s → %s", adp.name, adp.URL)
@@ -236,7 +236,7 @@ async def main():
     log.info("All done in %.0fs", elapsed)
     successes = sum(1 for r in results.values() if r.get("success"))
 
-    if args.json or args.synthesize:
+    if args.json:
         output = {
             "question": prompt,
             "platforms_queried": len(selected),

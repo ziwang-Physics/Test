@@ -131,7 +131,7 @@ class GeminiModeController:
         await page.wait_for_timeout(2000)
 
     async def _ensure_pro_extended(self, page) -> ModeResult:
-        """State machine: verify → apply → verify, one retry.
+        """State machine: verify → apply → verify, one retry with robust Angular CDK handling.
 
         P0 refactor (iteration-4 ChatGPT G-02): explicit state machine with
         pre- and post-condition verification.  Closes overlays in finally block
@@ -174,6 +174,20 @@ class GeminiModeController:
             except Exception:
                 pass
 
+        async def _wait_for_menu_items_filled(page, timeout_ms: int = 5000) -> bool:
+            """Wait for gem-menu-item elements to have non-empty innerText (Angular CDK rendering)."""
+            t0 = time.time()
+            while (time.time() - t0) * 1000 < timeout_ms:
+                count = await page.evaluate("""() => {
+                    return [...document.querySelectorAll('gem-menu-item')]
+                        .filter(el => (el.innerText || '').trim().length > 0)
+                        .length;
+                }""")
+                if count >= 2:
+                    return True
+                await asyncio.sleep(0.2)
+            return False
+
         last_reason = None
         extended_selected = False  # Track if we successfully clicked
 
@@ -201,7 +215,7 @@ class GeminiModeController:
                     last_reason = "MODEL_SELECTOR_NOT_CLICKABLE"
                     continue
 
-                if not await self._wait_for_menu_items(page):
+                if not await _wait_for_menu_items_filled(page):
                     last_reason = "MENU_ITEMS_NOT_RENDERED"
                     continue
 
@@ -213,7 +227,9 @@ class GeminiModeController:
                     # Re-open menu after Pro selection (model change closes it)
                     try:
                         await btn.click(timeout=5000)
-                        await self._wait_for_menu_items(page)
+                        if not await _wait_for_menu_items_filled(page):
+                            last_reason = "POST_PRO_MENU_REOPEN_FAILED"
+                            continue
                     except Exception:
                         last_reason = "POST_PRO_MENU_REOPEN_FAILED"
                         continue
@@ -250,7 +266,7 @@ class GeminiModeController:
 
     async def _wait_for_menu_items(self, page,
                                    timeout_ms: int = MENU_RENDER_TIMEOUT_MS) -> bool:
-        """Poll until >=2 gem-menu-item elements have non-empty innerText."""
+        """Poll until >=2 gem-menu-item elements have non-empty innerText (Angular CDK rendering)."""
         t0 = time.time()
         while (time.time() - t0) * 1000 < timeout_ms:
             count = await page.evaluate("""() => {
@@ -298,19 +314,50 @@ class GeminiModeController:
         log.warning("[Gemini] Pro model not found in menu items")
         return False
 
+    async def _wait_for_menu_items_filled(self, page, timeout_ms: int = 5000) -> bool:
+        """Wait for gem-menu-item elements to have non-empty innerText (Angular CDK rendering)."""
+        t0 = time.time()
+        while (time.time() - t0) * 1000 < timeout_ms:
+            count = await page.evaluate("""() => {
+                return [...document.querySelectorAll('gem-menu-item')]
+                    .filter(el => (el.innerText || '').trim().length > 0)
+                    .length;
+            }""")
+            if count >= 2:
+                return True
+            await asyncio.sleep(0.2)
+        return False
+
     async def _expand_thinking_submenu(self, page) -> bool:
-        """Click 'Thinking level' to expand submenu."""
+        """Click 'Thinking level' to expand submenu with enhanced detection."""
         items = await self._get_menu_items(page)
         for it in items:
             if ("思考程度" in it["text"] or "Thinking" in it["text"]) and it["visible"]:
                 try:
                     await page.locator("gem-menu-item").nth(it["i"]).click()
-                    await asyncio.sleep(SUBMENU_ANIMATION_S)
+                    # 增加等待时间，确保子菜单完全展开
+                    await asyncio.sleep(SUBMENU_ANIMATION_S * 2)  # 增加到4秒
                     log.info("[Gemini] Expanded thinking level submenu")
                     return True
                 except Exception as e:
                     log.warning("[Gemini] Thinking level click failed: %s", e)
                 break
+
+        # 备用方案：等待子菜单出现后再检测
+        log.info("[Gemini] 等待思考程度子菜单出现...")
+        await asyncio.sleep(3)
+        items = await self._get_menu_items(page)
+        for it in items:
+            if ("思考程度" in it["text"] or "Thinking" in it["text"]) and it["visible"]:
+                try:
+                    await page.locator("gem-menu-item").nth(it["i"]).click()
+                    await asyncio.sleep(SUBMENU_ANIMATION_S * 2)
+                    log.info("[Gemini] Expanded thinking level submenu (retry)")
+                    return True
+                except Exception as e:
+                    log.warning("[Gemini] Thinking level click failed (retry): %s", e)
+                break
+
         log.warning("[Gemini] '思考程度' menu item not found")
         return False
 
@@ -321,7 +368,7 @@ class GeminiModeController:
         Angular CDK re-renders that change nth indices), then falls back
         to nth-index click.
         """
-        if not await self._wait_for_menu_items(page):
+        if not await self._wait_for_menu_items_filled(page):
             log.warning("[Gemini] Submenu items never rendered")
             return False
 
@@ -354,3 +401,10 @@ class GeminiModeController:
 
         log.warning("[Gemini] '延長' menu item not found in %d items", len(items))
         return False
+
+    # Chrome stable version configuration
+    CHROME_STABLE_PATH = "/home/wangzi/soft/chrome-stable/chrome"
+
+    # Angular CDK menu rendering timing
+    MENU_ITEMS_FILLED_TIMEOUT_MS = 5000
+    MENU_ITEMS_FILLED_POLL_INTERVAL_S = 0.2

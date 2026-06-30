@@ -6,6 +6,7 @@ field is renamed or removed.
 """
 
 import sys, os, inspect
+import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from adapters import ADAPTER_REGISTRY, BaseAdapter

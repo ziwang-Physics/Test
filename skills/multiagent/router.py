@@ -337,13 +337,23 @@ async def run_parallel_route(task: str, plan: RoutePlan,
                        spare_platform, failed_platform)
 
     usable = sum(_is_usable_result(r) for r in all_results)
+    # R13 fix: quorum must reflect PRIMARY-platform health, not be inflated by
+    # fallback successes.  Old code summed primary+fallback then clamped to
+    # len(P2_CLASSES) — so if all 3 primaries failed but all 3 fallbacks
+    # succeeded, it reported quorum=healthy / success_count=3, hiding the fact
+    # that the primary fleet was down.
+    primary_usable = sum(
+        1 for r in all_results
+        if r.get("attempt_kind") == "primary" and _is_usable_result(r)
+    )
     return {
         "mode": "parallel",
         "success": usable > 0,
-        "quorum": PhaseStatus.from_success_count(min(usable, len(P2_CLASSES)), len(P2_CLASSES)),
+        "quorum": PhaseStatus.from_success_count(primary_usable, len(P2_CLASSES)),
         "results": all_results,
         "replacements": replacements,
         "success_count": usable,
+        "primary_success_count": primary_usable,
     }
 
 async def run_serial_route(task: str, plan: RoutePlan,

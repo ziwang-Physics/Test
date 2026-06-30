@@ -27,8 +27,9 @@ class TestPlatformId:
         normalized = key.lower()
         assert normalized == PlatformId.CHATGPT
 
-    def test_all_returns_six_platforms(self):
-        assert len(PlatformId.all()) == 6
+    def test_all_returns_eight_platforms(self):
+        # chatgpt, qianwen, gemini, kimi, claude, deepseek + minimax, doubao
+        assert len(PlatformId.all()) == 8
 
     def test_is_valid(self):
         assert PlatformId.is_valid("chatgpt")

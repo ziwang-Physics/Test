@@ -57,7 +57,7 @@ class GeminiResponseExtractor:
                         log.warning("[Gemini] Response truncated: %d → %d chars",
                                      len(text), self.MAX_RESPONSE_SIZE)
                         text = text[:self.MAX_RESPONSE_SIZE] + "\n[RESPONSE_TRUNCATED]"
-                    log.info("[Gemini] Strategy #%d '%s' → %d chars (baseline=%d)",
+                    log.info("[Gemini] Strategy #%d '%s' → %d chars (baseline=%s)",
                              i + 1, sel[:50], len(text), baseline)
                     return text
             except Exception as e:
