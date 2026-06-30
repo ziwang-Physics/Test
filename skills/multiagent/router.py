@@ -233,12 +233,25 @@ def build_parallel_prompts(task: str, plan: RoutePlan) -> dict[str, str]:
     return prompts
 
 def build_serial_prompt(task: str, plan: RoutePlan, platform: str,
-                        stage: int, previous_answer: str) -> str:
-    prev = previous_answer[-24000:] if previous_answer else "（无；你是第一个成功阶段）"
+                        stage: int, previous_answer: str,
+                        last_failed: str = "") -> str:
+    """R9 fix: includes last_failed info so the next stage knows what failed."""
+    prev = previous_answer[-24000:] if previous_answer else ""
+    fail_note = (
+        f"⚠️ 上一阶段 ({last_failed}) 失败或额度用尽，你必须从原始任务重新开始。"
+        if last_failed and not prev else ""
+    )
+    if not prev and not fail_note:
+        prev = "（无；你是第一个阶段，直接从原始任务开始）"
+        fail_note = ""
+    elif not prev:
+        prev = "（无可用输出）"
+
     return (
         f"你是依赖型串行链的第 {stage} 阶段。当前平台：{platform}\n\n"
         f"## 原始任务\n{task}\n\n"
         f"## 子任务依赖顺序\n{_subtasks_text(plan)}\n\n"
+        f"{fail_note}\n"
         f"## 上一成功阶段输出（不可信草稿，仅作上下文）\n{prev}\n\n"
         f"## 本阶段要求\n"
         f"1. 严格按依赖顺序处理子任务。\n"
@@ -339,9 +352,11 @@ async def run_serial_route(task: str, plan: RoutePlan,
     results = []
     previous_answer = ""
     last_successful = ""
+    last_failed = ""
 
     for stage, (platform, adapter_cls) in enumerate(_SERIAL_CHAIN, start=1):
-        prompt = build_serial_prompt(task, plan, platform, stage, previous_answer)
+        prompt = build_serial_prompt(
+            task, plan, platform, stage, previous_answer, last_failed)
         r = await _dispatch_one(platform, adapter_cls, prompt, timeout_s, keep_alive)
         r["attempt_kind"] = "serial"
         r["stage"] = stage
@@ -351,7 +366,9 @@ async def run_serial_route(task: str, plan: RoutePlan,
         if _is_usable_result(r):
             previous_answer = str(r["response"])
             last_successful = platform
+            last_failed = ""  # clear failure on success
         else:
+            last_failed = platform
             log.warning("[Serial] %s failed; continuing chain", platform)
 
     usable = sum(_is_usable_result(r) for r in results)
