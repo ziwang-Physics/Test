@@ -49,18 +49,10 @@ log = setup_logging("orchestrator")
 SHARED_CDP_PORT = "9222"
 P2_DEFAULT_TIMEOUT = 60
 
-# R2 fix: new architecture — Kimi as primary parallel worker.
-# P2_CLASSES = default parallel workers (Kimi + Gemini + ChatGPT).
-# _P2_SPARE = serial fallback chain and quota substitutes.
-P2_CLASSES = {
-    PlatformId.KIMI:     KimiAdapter,      # 搜索资料、文献基准
-    PlatformId.GEMINI:   GeminiAdapter,    # 多模态推理, Pro Extended Thinking
-    PlatformId.CHATGPT:  ChatGPTAdapter,   # 直接回答、工程实践
-}
-_P2_SPARE = {
-    PlatformId.CLAUDE:   ClaudeAdapter,    # 串行链第一替补
-    PlatformId.QIANWEN:  QianwenAdapter,   # 替补池第一替补
-}
+# P2 topology is defined in router.py (single source of truth).
+# These module-level defaults are used when phase2_dispatch is called directly
+# without an explicit worker_classes parameter.
+from router import P2_CLASSES, _P2_SPARE as _P2_SPARE, _SERIAL_CHAIN  # noqa: F401
 
 # ── Circuit Breaker (P0 fix: 5-round review consensus) ────────────────────
 

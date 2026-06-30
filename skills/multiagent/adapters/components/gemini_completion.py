@@ -48,6 +48,17 @@ class GeminiCompletionDetector:
         def _remaining():
             return max(1_000, timeout_ms - int((_time.time() - start) * 1000))
 
+        # P0 fix (R12): record baseline toolbar count BEFORE generation.
+        # Old code used .first toolbar which could match a toolbar from
+        # a previous conversation turn — immediately declaring completion.
+        baseline_toolbars = 0
+        try:
+            baseline_toolbars = await page.evaluate("""(sel) => {
+                return document.querySelectorAll(sel).length;
+            }""", self.toolbar_sel)
+        except Exception:
+            pass
+
         # STATE 1 — SENDING: wait for stop button to confirm submission
         try:
             stop_btn = page.locator(self.stop_sel).first
@@ -63,17 +74,19 @@ class GeminiCompletionDetector:
         except Exception:
             log.info("[Gemini] Stop button still visible or timed out")
 
-        # STATE 3 — THINKING→COMPLETE: wait for toolbar using caller's deadline.
-        # P0 fix: use _remaining() (full deadline) instead of 90s hard cap.
-        # Extended Thinking can take 30-300s with zero DOM changes — the old
-        # 90s cap caused premature timeout and EMPTY_OR_TOO_SHORT responses.
+        # STATE 3 — THINKING→COMPLETE: wait for NEW toolbar using caller's deadline.
+        # P0 fix (R12): require toolbar count > baseline. Old code used .first
+        # which could match a toolbar from a PREVIOUS conversation turn, causing
+        # immediate false completion on reused tabs.
         toolbar_found = False
         try:
-            toolbar = page.locator(self.toolbar_sel).first
-            await toolbar.wait_for(state="visible", timeout=_remaining())
+            # Wait for a NEW toolbar element to appear (count increased from baseline)
+            await page.wait_for_function("""([sel, baseline]) => {
+                return document.querySelectorAll(sel).length > baseline;
+            }""", [self.toolbar_sel, baseline_toolbars], timeout=_remaining())
             toolbar_found = True
-            log.info("[Gemini] Toolbar detected — generation complete (%.0fs)",
-                     (_time.time() - start))
+            log.info("[Gemini] NEW toolbar detected — generation complete (%.0fs, baseline=%d)",
+                     (_time.time() - start), baseline_toolbars)
         except Exception:
             log.info("[Gemini] Toolbar wait exhausted — deadline reached")
 
