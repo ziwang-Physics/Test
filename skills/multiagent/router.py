@@ -83,8 +83,11 @@ class RoutePlan:
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 def _is_usable_result(result: dict[str, Any]) -> bool:
+    """R7 fix: lowered threshold from 20 to 5 chars.  20-char minimum
+    rejected short but valid answers (e.g. '2' for '1+1=?').  Now only
+    excludes truly empty/token responses."""
     response = str(result.get("response", "")).strip()
-    return bool(result.get("success") and response and len(response) >= 20)
+    return bool(result.get("success") and response and len(response) >= 5)
 
 def _subtasks_text(plan: RoutePlan) -> str:
     lines = []
