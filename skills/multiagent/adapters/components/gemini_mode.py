@@ -175,6 +175,7 @@ class GeminiModeController:
                 pass
 
         last_reason = None
+        extended_selected = False  # Track if we successfully clicked
 
         for attempt in range(2):
             try:
@@ -183,6 +184,13 @@ class GeminiModeController:
                 if model == "pro" and level == "extended":
                     log.info("[Gemini] Pro Extended verified ✓ (attempt %d)", attempt + 1)
                     return ModeResult(True, model, level, recovered=attempt > 0)
+                # P0 fix (R3): Gemini aria-label doesn't always update with
+                # thinking level. If we successfully clicked "延長" in a
+                # previous attempt, treat it as verified.
+                if model == "pro" and extended_selected:
+                    log.info("[Gemini] Pro model confirmed + Extended was selected — "
+                            "verifying optimistically (aria-label may not reflect level)")
+                    return ModeResult(True, model, "extended", recovered=attempt > 0)
 
                 # Step 2: Close any open overlays + re-open
                 await _close_overlays()
@@ -219,6 +227,7 @@ class GeminiModeController:
                 if not await self._select_extended(page):
                     last_reason = "EXTENDED_SELECTION_FAILED"
                     continue
+                extended_selected = True  # P0 fix (R3): trust click success
 
                 # Step 6: Close + final verification
                 await _close_overlays()
