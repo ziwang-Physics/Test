@@ -1,7 +1,8 @@
 # MultiAgent: 3-Mode DAG Pipeline + DeepSeek One-Shot Judge
 
-> **最后更新**: 2026-07-01 — 决策分工文档 + 9 轮 Web AI 对抗审查记录
-> **验证**: 20+ 轮 loop 迭代，100+ 次独立专家评估，9 轮 ChatGPT+Gemini 联审（ChatGPT 12k-15k 字符/轮，Gemini 3k-5k 字符/轮）
+> **最后更新**: 2026-07-01 — ChatGPT 重设计架构流程图 + 9 轮对抗审查记录
+> **验证**: 20+ 轮 loop 迭代，100+ 次独立专家评估，9 轮 ChatGPT+Gemini 联审
+> **架构**: 问题拆解 → 并行(Kimi+Gemini+GPT) / 串行(Gemini→GPT→Claude→...→豆包) → DeepSeek 裁决
 
 ---
 
@@ -129,65 +130,112 @@ R5-R9: 稳定产出 3000-5000 字符 ✅
 
 ---
 
-## Architecture
+## Architecture（ChatGPT 设计）
+
+### 总流程图
 
 ```
-User Question
-     │
-     ▼
-🟢 Phase 1: Claude Code (powered by DeepSeek LLM) — DIRECT REASONING
-   RoutingState 评估器: 三维特征 {complexity, uncertainty, structure_need}
-   模式选择: PARALLEL(默认，>90%查询) / SIMPLE(罕见，简单事实) / CONSENSUS(升级)
-   Output: $WORKDIR/prompts.json  (WORKDIR = mktemp -d)
-   ⚡ No browser — instant
-     │
-     ▼
-🟡 Phase 2: 3 Expert Nodes — CONCURRENT FIRE-AND-COLLECT (Playwright → Chrome tabs)
-   $ python3 orchestrator.py phase2 --file $WORKDIR/prompts.json --json
-   ┌──────────┬──────────┬──────────┐
-   │ ChatGPT  │ Kimi     │ Gemini   │
-   │ 工程+搜索  │ 安全防御  │ 推理+搜索  │
-   └──────────┴──────────┴──────────┘
-   Gemini auto-enables Pro Extended Thinking. Kimi/Qianwen thinking-selector
-   prevents mid-generation extraction. 3 tabs, shared Chrome context.
-   Hard timeout: 60s per platform. asyncio.wait() convergence. ~50s.
-     │
-     ├─ 一致性 ≥ 2/3 AND 置信 ≥ 0.7 → 跳过 P4，直接输出
-     │
-     └─ 一致性 < 2/3 OR 置信 < 0.7 → 进入 P3
-     │
-     ▼
-🟠 Phase 3: Claude Code — DIRECT REASONING
-   Compress into structured matrix: 共识区/特色区/冲突区 H2 sections.
-   Output: $WORKDIR/matrix.md  ⚡ No browser — instant
-     │
-     ▼
-🔴 Phase 4: DeepSeek V4 Pro API — ONE-SHOT SCORING-SYNTHESIS JUDGE
-   $ python3 orchestrator.py phase4 --file $WORKDIR/matrix.md --prompts-file $WORKDIR/prompts.json
-   
-   内部流程 (单次 API 调用):
-     1. Independence Check Gate — 检测共享幻觉
-     2. Scoring (0-10 per worker) + Conflict Graph + Arbitration
-     3. Synthesis — 最大自洽子图选边 + 融合
-   
-   ⚡ API call, ~5-15s. Zero DOM dependency.
-     │
-     ├─ 置信 < 阈值 → Condorcet 门控:
-     │   ├─ p < 0.5 (困难任务): P4 Long CoT 深度思考
-     │   └─ p > 0.5: 选择性激活 Claude → 再跑一轮 → P4
-     │
-     ▼
-   Final Output (presented by Claude to user)
+┌──────────────────────────────┐
+│           用户提问           │
+└──────────────┬───────────────┘
+               ▼
+┌──────────────────────────────┐
+│        问题拆解智能体        │
+│   拆分子问题并分析依赖关系   │
+└──────────────┬───────────────┘
+               ▼
+        ┌───────────────┐
+        │ 子问题是否独立 │
+        └───────┬───────┘
+          是    │    否
+      ┌────────┘    └─────────┐
+      ▼                        ▼
+┌──────────────────┐    ┌──────────────────┐
+│     并行模式     │    │     串行模式     │
+└────────┬─────────┘    └────────┬─────────┘
+         │                        │
+   ┌─────┼─────┐                  ▼
+   ▼     ▼     ▼          ┌────────────────┐
+┌──────┐┌──────┐┌──────┐  │    双子星座    │
+│月之暗││双子星││开放智│  │ 延伸思考必须开启│
+│面搜索││座多模││能直接│  └───────┬────────┘
+│与文献││态推理││回答与│          │失败或额度用尽
+│基准  ││延伸思││工程实│          ▼
+│      ││考必开││践    │  ┌────────────────┐
+└──┬───┘└──┬───┘└──┬───┘  │    开放智能    │
+   │       │       │      └───────┬────────┘
+   │       │       │              │失败或额度用尽
+   │       │       │              ▼
+   │       │       │      ┌────────────────┐
+   │       │       │      │      克劳德    │
+   │       │       │      └───────┬────────┘
+   │       │       │              │失败或额度用尽
+   │       │       │              ▼
+   │       │       │      ┌────────────────┐
+   │       │       │      │      千问      │
+   │       │       │      └───────┬────────┘
+   │       │       │              │失败或额度用尽
+   │       │       │              ▼
+   │       │       │      ┌────────────────┐
+   │       │       │      │     海螺智能   │
+   │       │       │      └───────┬────────┘
+   │       │       │              │失败或额度用尽
+   │       │       │              ▼
+   │       │       │      ┌────────────────┐
+   │       │       │      │      豆包      │
+   │       │       │      └───────┬────────┘
+   │       │       │              │
+   └───────┴───────┴──────────────┘
+                   │
+                   ▼
+       ┌────────────────────────┐
+       │ 任一网页模型额度用尽？ │
+       └───────────┬────────────┘
+             是    │    否
+          ┌────────┘    └────────┐
+          ▼                      │
+┌──────────────────────────────┐ │
+│          替补池递补          │ │
+│   千问 → 海螺智能 → 豆包    │ │
+└──────────────┬───────────────┘ │
+               └─────────┬───────┘
+                         ▼
+┌────────────────────────────────┐
+│           汇集所有结果         │
+└────────────────┬───────────────┘
+                 ▼
+┌────────────────────────────────┐
+│       深度求索接口统一裁决     │
+│        评分・仲裁・合成        │
+└────────────────┬───────────────┘
+                 ▼
+┌────────────────────────────────┐
+│            输出最终答案        │
+└────────────────┬───────────────┘
+                 ▼
+┌────────────────────────────────┐
+│          关闭本轮无用标签页    │
+└────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────┐
+│                    网页端统一操控层                        │
+│       浏览器调试协议连接 + 剧作家自动化框架                │
+│   负责页面连接、输入发送、状态检测、结果提取与标签页管理    │
+└────────────────────────────────────────────────────────────┘
 ```
 
-**DAG 升级路径 (单向不可逆)**:
-```
-SIMPLE ──→ PARALLEL ──→ CONSENSUS
-(极罕见)   (默认>90%)   (高冲突/低置信时)
-                │            │
-                │ 2/3一致    │ Condorcet p<0.5 → P4 深度思考
-                │ → 直出     │ Condorcet p>0.5 → +Claude → P4 One-Shot
-```
+### 两种执行路径
+
+**并行模式**（子问题相互独立）：
+- Kimi（月之暗面）：搜索网页资料、文献基准
+- Gemini（双子星座）：多模态推理，**必须启用 Pro Extended Thinking**
+- GPT（开放智能）：直接回答问题、工程实践
+- 任一额度用尽 → 替补池递补
+
+**串行模式**（子问题不独立）：
+- 按序调用：Gemini → GPT → Claude → 千问 → MiniMax → 豆包
+- 当前模型额度用尽 / 失败 → 自动跳到下一个
+- 获得有效答案即停止，不继续后续模型
 
 **模式分配**:
 - **PARALLEL (默认)**: 3 路并发，lens prompt，覆盖 >90% 查询。一致性 ≥2/3 直接返回
