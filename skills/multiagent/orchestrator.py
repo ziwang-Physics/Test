@@ -782,7 +782,8 @@ async def _cancel_and_drain(*awaitables) -> None:
 
 async def phase2_dispatch(prompts: dict,
                           timeout_s: int = P2_DEFAULT_TIMEOUT,
-                          keep_alive: bool = True) -> dict:
+                          keep_alive: bool = True,
+                          worker_classes: dict | None = None) -> dict:
     """Send prompts to AI platforms concurrently, with browser recovery.
 
     P0 refactor (ChatGPT Round 2, 2026-06-30): wraps worker execution in an
@@ -790,13 +791,17 @@ async def phase2_dispatch(prompts: dict,
     are cancelled, browser is reconnected, and workers are rerun with fresh
     pages/leases.  Up to MAX_BROWSER_RECOVERY reconnects.
 
+    R4: *worker_classes* overrides the default P2_CLASSES topology.
+    Router uses this to dispatch single-platform or custom worker sets.
+
     Returns {quorum, results, success_count, timeout_count, recovery_count}.
     """
     log.info("🟡 Phase 2: Dispatch — %d platforms", len(prompts))
 
     # Build selected workers list
+    classes = worker_classes if worker_classes is not None else P2_CLASSES
     selected = []
-    for name, adapter_cls in P2_CLASSES.items():
+    for name, adapter_cls in classes.items():
         prompt_text = prompts.get(name, "")
         if not prompt_text or not prompt_text.strip():
             log.warning("[P2] No prompt for %s, skipping", name)
@@ -1063,18 +1068,47 @@ async def phase4_adjudicate(matrix: str, task_core: str) -> str:
 def main():
     if len(sys.argv) < 2:
         print("Usage:", file=sys.stderr)
+        print("  orchestrator.py run 'question' [--mode auto|parallel|serial] [--json]", file=sys.stderr)
         print("  orchestrator.py phase2 --file prompts.json --json", file=sys.stderr)
-        print("  orchestrator.py phase4 --file matrix.md --prompts-file prompts.json",
-              file=sys.stderr)
-        print("\nOptions:", file=sys.stderr)
-        print("  --timeout N    Phase 2 per-platform timeout (default: 60s)",
-              file=sys.stderr)
-        print("  --json         Output Phase 2 results as JSON", file=sys.stderr)
+        print("  orchestrator.py phase4 --file matrix.md --prompts-file prompts.json", file=sys.stderr)
         sys.exit(1)
 
     cmd = sys.argv[1]
 
-    if cmd == "phase2":
+    if cmd == "run":
+        from router import run_pipeline
+        parser = argparse.ArgumentParser(description="End-to-end MultiAgent pipeline")
+        parser.add_argument("run_cmd", nargs="?")
+        parser.add_argument("task", nargs="?")
+        parser.add_argument("--file", type=str, help="Read task from file")
+        parser.add_argument("--mode", choices=["auto","parallel","serial"], default="auto")
+        parser.add_argument("--timeout", type=int, default=P2_DEFAULT_TIMEOUT)
+        parser.add_argument("--close-tabs", action="store_true")
+        parser.add_argument("--json", action="store_true")
+        args = parser.parse_args()
+
+        if args.file:
+            with open(args.file, encoding="utf-8") as f:
+                task = f.read().strip()
+        elif args.task:
+            task = args.task.strip()
+        elif not sys.stdin.isatty():
+            task = sys.stdin.read().strip()
+        else:
+            print("ERROR: No task provided", file=sys.stderr)
+            sys.exit(1)
+
+        result = asyncio.run(run_pipeline(
+            task, mode=args.mode, timeout_s=args.timeout,
+            keep_alive=not args.close_tabs,
+        ))
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(result.get("final_answer", ""))
+        sys.exit(0 if result.get("success") else 2)
+
+    elif cmd == "phase2":
         parser = argparse.ArgumentParser()
         parser.add_argument("phase2_cmd", nargs="?")
         parser.add_argument("prompts_json", nargs="?")
