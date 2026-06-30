@@ -1,7 +1,7 @@
 # MultiAgent: 3-Mode DAG Pipeline + DeepSeek One-Shot Judge
 
-> **最后更新**: 2026-07-01 — 决策分工与能力边界文档化
-> **验证**: 20+ 轮 loop 迭代，100+ 次独立专家评估，30 轮 ChatGPT+Gemini 对抗审查
+> **最后更新**: 2026-07-01 — 决策分工文档 + 9 轮 Web AI 对抗审查记录
+> **验证**: 20+ 轮 loop 迭代，100+ 次独立专家评估，9 轮 ChatGPT+Gemini 联审（ChatGPT 12k-15k 字符/轮，Gemini 3k-5k 字符/轮）
 
 ---
 
@@ -37,6 +37,53 @@
 7. 记录本轮遇到的问题（模式失败、超时、崩溃等）→ 传给下一轮 prompt
 8. 重复 1-7
 ```
+
+---
+
+## Web AI 对抗性审查记录（ChatGPT + Gemini 联审）
+
+> 2026-06-30 ~ 07-01，9 轮迭代审查，ChatGPT 稳定产出 12,000-15,000 字符/轮，Gemini R5 起稳定产出 3,000-5,000 字符/轮。
+
+### 审查机制
+
+每轮：ChatGPT（工程实践视角）+ Gemini（推理深度视角，强制 Pro Extended Thinking）→ 访问 GitHub 阅读代码 → 独立给出审查报告 → Claude Code 提取建议 → 实施修复 → Push → 下一轮看到新代码。
+
+### 关键发现与修复
+
+| 轮次 | 发现 | 级别 | 修复状态 |
+|------|------|------|---------|
+| R1 | 异常路径用 `len(partial)>20` 判定成功——登录页、错误页被当答案 | P0 | ✅ 已修复 |
+| R1 | `UI_CHROME_DOMINANT` 进入 quorum——页面 UI 文本被当证据 | P0 | ✅ 已修复 |
+| R1 | `body.textContent` 作为兜底答案——整页 HTML 可能进入裁决 | P0 | ✅ 已修复 |
+| R2 | Gemini baseline 类型断裂——base.py 返回 dict，组件仍当 int 用，`i>=NaN` | P0 | ✅ 已修复 |
+| R3 | Gemini Extended 验证失败——aria-label 不更新，乐观验证加入 | P0 | ✅ 已修复 |
+| R3 | 页面替换后租约和心跳未迁移——孤儿 Tab 累积 | P0 | 🔄 部分修复 |
+| R4 | 乐观验证生效——Gemini 从 THINKING_MODE_FAILED 变为可发送 | — | ✅ 已验证 |
+| R5 | **Gemini 首次成功**——诊断 Extended Thinking 完成检测缺陷 | — | ✅ 里程碑 |
+| R5 | DOM 静默检测在 ET 30-90s 推理期间误判完成 | P0 | ⏳ 待修复 |
+| R6 | Gemini 建议：用 UI 状态机(停止按钮+工具栏)替代 DOM 防抖 | P0 | ⏳ 待修复 |
+| R7 | ChatGPT R6 "FATAL" 证实为日志误报 | — | ✅ 已澄清 |
+| R8 | Deadline 仍用 `time.time()` 非单调钟、关键路径未接入 | P0 | ⏳ 待修复 |
+| R8 | AbortableBarrier 取消路径残留"幽灵参与者" | P1 | ⏳ 待修复 |
+| R9 | main.py vs orchestrator.py 两套生命周期、退出码不一致 | P1 | ⏳ 待修复 |
+
+### Gemini Extended Thinking 启用历程
+
+```
+R1-R3: THINKING_MODE_FAILED → 模式验证 aria-label 不更新
+    ↓ R3 修复：文本定位器点击 + 乐观验证
+R4: 模式通过，但响应空 → DOM 静默检测过早触发
+    ↓ R5 诊断：ET 内部推理 30-90s 无 DOM 变化
+R5-R9: 稳定产出 3000-5000 字符 ✅
+```
+
+### 已知待修复（优先级排序）
+
+1. **DOM 静默检测 → UI 状态机**：Extended Thinking 期间用停止按钮/工具栏替代纯文本长度防抖
+2. **Deadline monotonic 时钟**：`time.time()` → `time.monotonic()`，接入关键路径
+3. **页面替换原子化**：`_replace_page()` 统一迁移 lease + heartbeat
+4. **quorum 语义严格化**：分离 transport_completed / validated / quorum_met
+5. **P4 结构化返回**：不再返回空字符串表示所有失败
 
 ---
 
