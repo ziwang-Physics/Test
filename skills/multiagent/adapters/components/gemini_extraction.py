@@ -31,24 +31,27 @@ class GeminiResponseExtractor:
         self._get_baseline = get_baseline
 
     async def extract_response(self, page) -> str:
-        """Baseline-aware multi-strategy extraction.
+        """Per-selector baseline multi-strategy extraction.
 
-        P0 fix (2026-06-30): only extracts elements at index >= baseline,
-        preventing user-message extraction in reused tabs.
+        P0 fix (R2): baseline is now dict[selector→count], not scalar int.
+        Old code passed the dict where JS expected integer, causing `i >= NaN`.
         """
-        baseline = self._get_baseline() if self._get_baseline else 0
+        baseline = self._get_baseline() if self._get_baseline else {}
+        if isinstance(baseline, (int, float)):
+            baseline = {s: int(baseline) for s in self.strategies}
 
         for i, sel in enumerate(self.strategies):
             try:
-                text = await page.evaluate("""([sel, baseline]) => {
+                start = baseline.get(sel, 0) if isinstance(baseline, dict) else 0
+                text = await page.evaluate("""([sel, start]) => {
                     const els = document.querySelectorAll(sel);
                     if (els.length === 0) return '';
-                    for (let i = els.length - 1; i >= baseline; i--) {
+                    for (let i = els.length - 1; i >= start; i--) {
                         const t = (els[i].textContent || els[i].innerText || '').trim();
                         if (t.length > 30) return t;
                     }
                     return '';
-                }""", [sel, baseline])
+                }""", [sel, start])
                 if text and len(text) > 30:
                     if len(text) > self.MAX_RESPONSE_SIZE:
                         log.warning("[Gemini] Response truncated: %d → %d chars",

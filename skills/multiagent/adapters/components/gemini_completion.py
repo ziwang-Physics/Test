@@ -114,18 +114,26 @@ class GeminiCompletionDetector:
             return ""
 
     async def _extract(self, page) -> str:
-        """Extract using baseline-aware strategy scanning."""
-        baseline = self._get_baseline() if self._get_baseline else 0
+        """Extract using per-selector baseline scanning.
+
+        P0 fix (R2): baseline is now dict[selector→count], not scalar int.
+        Old code passed the dict where JS expected integer, causing `i >= NaN`
+        which never matched any element — new responses were silently skipped.
+        """
+        baseline = self._get_baseline() if self._get_baseline else {}
+        if isinstance(baseline, (int, float)):
+            baseline = {s: int(baseline) for s in self.strategies}
         for sel in self.strategies:
             try:
-                text = await page.evaluate("""([sel, baseline]) => {
+                start = baseline.get(sel, 0) if isinstance(baseline, dict) else 0
+                text = await page.evaluate("""([sel, start]) => {
                     const els = document.querySelectorAll(sel);
-                    for (let i = els.length - 1; i >= baseline; i--) {
+                    for (let i = els.length - 1; i >= start; i--) {
                         const t = (els[i].textContent || els[i].innerText || '').trim();
                         if (t.length > 30) return t;
                     }
                     return '';
-                }""", [sel, baseline])
+                }""", [sel, start])
                 if text and len(text) > 30:
                     return text
             except Exception:
