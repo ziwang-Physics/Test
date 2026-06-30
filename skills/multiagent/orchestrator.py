@@ -697,7 +697,9 @@ async def _p2_worker(adapter, prompt: str, results: dict,
             "quorum_eligible": False,
         }
     finally:
-        # P1 fix: only keep alive if healthy AND lease is still valid
+        # P0 fix (R10): always close unhealthy or non-keep-alive pages.
+        # Old code skipped close when lease didn't validate — but a stale
+        # lease meant nobody would ever close the orphan tab.
         healthy = (
             page is not None
             and not page.is_closed()
@@ -705,17 +707,14 @@ async def _p2_worker(adapter, prompt: str, results: dict,
             and page.url != "about:blank"
             and not page.url.startswith("chrome-error://")
         )
-        # Validate lease before closing — requires epoch + generation
         gen = lease_token.generation if lease_token else 0
-        can_close = healthy and leases and leases.validate(page, name, browser_epoch, gen)
-        if page and keep_alive and healthy and can_close:
+        lease_valid = leases and leases.validate(page, name, browser_epoch, gen) if leases else True
+        if page and keep_alive and healthy and lease_valid:
             log.info("[P2:%s] keep_alive — page preserved for reuse", name)
         elif page:
-            if leases and not can_close:
-                log.info("[P2:%s] lease invalid — skipping close (page may be transferred)", name)
-            else:
-                log.info("[P2:%s] page not preserved (healthy=%s)", name, healthy)
-                await _safe_close_page(page, name)
+            reason = "unhealthy" if not healthy else "lease_invalid" if not lease_valid else "keep_alive_off"
+            log.info("[P2:%s] closing page (%s)", name, reason)
+            await _safe_close_page(page, name)
         # Release lease regardless (P1 fix: pass token for CAS safety)
         if leases and lease_token:
             leases.release(token=lease_token)

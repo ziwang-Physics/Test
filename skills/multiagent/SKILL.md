@@ -249,152 +249,57 @@ R5-R9: 稳定产出 3000-5000 字符 ✅
 
 ---
 
-## Grand Orchestrator Workflow (MANDATORY)
+## 快速使用
 
-### Pre-flight check:
+### 端到端运行（推荐）
 ```bash
-# 1. CDP token must exist
-test -f ~/.chrome-debug-profile/.cdp_token || { echo "ERROR: Chrome CDP token not found. Run: bash ~/connect-gemini.sh"; exit 1; }
-export CHROME_CDP_TOKEN=$(cat ~/.chrome-debug-profile/.cdp_token)
-# 2. Token file permissions must be 0600
-test "$(stat -c %a ~/.chrome-debug-profile/.cdp_token)" = "600" || chmod 600 ~/.chrome-debug-profile/.cdp_token
-# 3. CDP must bind to localhost only (P1: DNS rebinding hardened check)
-python3 -c "from common import verify_cdp_safe; ok, msg = verify_cdp_safe(); print(msg); exit(0 if ok else 1)" || { echo "ERROR: CDP unsafe — must bind 127.0.0.0/8 only"; exit 1; }
-# 4. /tmp disk space >= 10MB
-test $(df -m /tmp | awk 'NR==2{print $4}') -ge 10 || { echo "ERROR: /tmp disk full"; exit 1; }
+cd skills/multiagent
+
+# 自动路由（DeepSeek 判断并行/串行）
+python3 orchestrator.py run "你的问题"
+
+# 强制并行模式
+python3 orchestrator.py run "你的问题" --mode parallel
+
+# 强制串行模式
+python3 orchestrator.py run "你的问题" --mode serial
+
+# JSON 输出
+python3 orchestrator.py run "你的问题" --json
+
+# 自定义超时
+python3 orchestrator.py run "你的问题" --timeout 300
 ```
 
-### Step 1: Decompose & Route (Claude Code — no browser)
-
-**RoutingState 评估器**: 分析请求，输出三维特征 `{complexity, uncertainty, structure_need}` + 模式选择。
-
-- **PARALLEL (默认，>90% 查询)**: 生成 3 个 lens prompt。`complexity ≥ 0.3 OR uncertainty ≥ 0.3 → PARALLEL`
-- **SIMPLE (极罕见)**: 1 worker 直接回答。`complexity < 0.3 AND uncertainty < 0.3` (如 "1+1=?" / "北京在哪")
-- **CONSENSUS (升级触发，非初始选择)**: 仅由 P3 检测 PARALLEL 分歧后升级
-
-**Sandwich Prompt Template (PARALLEL 模式)**:
-
-```
-Layer 1 — Core Question (完全同化, ~80%):  所有平台一字不差的核心问题，占 prompt 主体
-Layer 2 — Primary Lens  (特性锐度, ~15%):  一句简短视角指令，轻微引导分析方向
-Layer 3 — Cross-Coverage (交叉补位, ~5%):  一个短语提示覆盖其他维度，仅作兜底
-```
-
-**Rationale**: Core Question 占 80% 确保所有 AI 围绕相同的核心问题回答——这是 P3 共识/冲突提取的前提。3 个视角（工程/文献/推理）互补无重叠。Primary Lens 仅提供方向性微调。Cross-Coverage 降为一个短语，覆盖其余 2 个视角。
-
-**Sandwich Prompt Template:**
-
-```json
-{
-  "task_core": "one-sentence summary (max 120 chars)",
-  "worker_prompts": {
-    "chatgpt": "【核心问题】<完全相同的 question，占主体> （附加视角：侧重工程实践与代码效率。请自行搜索网页获取最新资料。简略带过安全防御、推理深度。）",
-    "qianwen": "【核心问题】<完全相同的 question，占主体> （附加视角：侧重安全与防御性架构分析，请搜索网页验证。简略带过工程实践、推理深度。）",
-    "gemini": "【核心问题】<完全相同的 question，占主体> （附加视角：侧重推理深度与逻辑一致性。请自行搜索网页获取最新资料。简略带过工程实践、安全防御。）"
-  }
-}
-```
-
-**Why 3 workers (not 5)**: 实测数据 — ChatGPT ~100% 可用, Kimi ~95%, Gemini ~80%。Claude 免费额度 ~85% 不可用；Qianwen 安全视角在非安全场景中边际贡献极低。3 视角 (工程/文献/推理) 互补无重叠，降低 CDP 并发内存 40%，P2 耗时从 ~75s 降到 ~50s，共识判定从 2/5 弱共识变 2/3 强共识。
-
-**Replacement rules for `<完全相同的 question>`:**
-- Insert the user's actual question verbatim, NOT a rephrased version
-- If the question is long (>200 chars), use the `task_core` summary instead
-- The question block is identical across all 4 platforms — no variation
-
-**Cross-Coverage weight rule:**
-- Cross-coverage is a single parenthetical phrase after the core question — one sentence total
-- Total cross-coverage ≤ 5% of prompt length — the core question dominates
-- Primary Lens is ~15% — one clause steering the angle, not a full paragraph
-- If the AI ignores Lens/Cross-Coverage entirely, the core question answer alone is still complete
-
-Write to `$WORKDIR/prompts.json`.
-
-### ⚠️ 铁律 (MUST — never skip)
-
-1. **GitHub URL**: 必须传 `https://github.com/ziwang-Physics/Test` 给 AI，绝不传本地路径
-2. **Gemini Extended Thinking**: 每次 P2 **必须**启用 Pro Extended Thinking（`ensure_pro_extended()`），不可降级
-3. **Wait ALL**: 等所有 AI 完全生成完毕（toolbar/stability 确认），不截断
-
-### Step 2: Dispatch (browser automation)
+### 分步执行
 ```bash
-python3 ~/.claude/skills/multiagent/orchestrator.py phase2 \
-  --file "$WORKDIR/prompts.json" --timeout 600 --json > "$WORKDIR/p2_results.json"
+# Phase 2: 手动控制 Worker
+python3 orchestrator.py phase2 --file prompts.json --json
+
+# Phase 4: 手动裁决
+python3 orchestrator.py phase4 --file matrix.md --prompts-file prompts.json
 ```
 
-### Step 3: Compress (Claude Code — no browser)
-Read `$WORKDIR/p2_results.json`. Produce matrix with **共识区/特色区/冲突区** H2 sections. Write to `$WORKDIR/matrix.md`.
+### 执行模式
 
-### Step 3.5: Early Exit (PARALLEL consensus check)
-
-Before P3 compression, check if P4 is even needed:
-
-```
-if consensus_ratio >= 2/3 AND synthesis_confidence >= 0.7:
-    → 跳过 P3+P4，直接输出多数答案
-else:
-    → 进入 P3 矩阵压缩 → P4 裁决
-```
-
-### Step 4: Adjudicate — One-Shot Scoring-Synthesis Judge (DeepSeek V4 Pro API)
-
-Single API call. Internal steps executed in one prompt:
-
-1. **Independence Check Gate**: 检测 3 个 worker 输出语义相似度 >0.85 → 判定"伪多数"，阻断合成
-2. **Scoring**: 每 worker 评分 0-10 (正确性/完整性/一致性/简洁性)
-3. **Conflict Graph**: 提取事实断言建矛盾图 → 最大自洽子图选边 → 不做平均/妥协
-4. **Synthesis**: 融合高置信片段 → 输出最终答案 + 证据链 + 弃用观点+原因
-
-**CONSENSUS 升级 (P4 置信不足时)**:
-
-```
-P4 confidence < 0.7:
-    │
-    ├─ Condorcet 门控: 评估任务难度 → p 值
-    │   p < 0.5 (困难): 禁止横向扩展
-    │       → P4 切换 Long CoT / Tree of Thoughts 深度推理
-    │   p > 0.5: 选择性激活备选池
-    │       → +Claude (Sonnet 4.6)
-    │       → 3 core + 1 spare = 4 workers 重跑一轮
-    │       → 最多扩展至 5 (含 MiniMax，排除豆包 deprecated)
-    │
-    └─ 新结果 → P4 One-Shot Judge 再次裁决 → 最终输出
-```
-
-**动态 p 阈值**: 基于任务域历史精度 (JudgeBench 基准: GPT-4o 跨域精度 Knowledge 44.2% ~ Math 66.1%)。零样本 log-probability 作为实例级代理。固定 0.5 不可行——跨域差 >20pp。
-
-> **P1 upgrade (2026-06-28)**: Replaced Gemini Web CDP with DeepSeek V4 Pro API.
-> Zero DOM dependency, 100% injection success, second-level latency.
-> API key from `$DEEPSEEK_API_KEY` env var.
-
-```bash
-python3 ~/.claude/skills/multiagent/orchestrator.py phase4 \
-  --file "$WORKDIR/matrix.md" \
-  --prompts-file "$WORKDIR/prompts.json"
-```
-
-### Step 5: Present + Cleanup
-Read Gemini's output. Present to user. Run `rm -rf "$WORKDIR"`.
+| 模式 | 触发条件 | 行为 |
+|------|---------|------|
+| **auto** (默认) | DeepSeek 路由器判断 | 独立子问题→并行(Kimi+Gemini+ChatGPT)；有依赖→串行链 |
+| **parallel** | --mode parallel | 强制 3 Worker 并行 + 替补池 |
+| **serial** | --mode serial | 严格串行链 Gemini→ChatGPT→Claude→Qwen→MiniMax→Doubao |
 
 ---
 
-## Degradation Chain
+## 降级策略
 
-| Phase | Failure | Fallback |
-|-------|---------|----------|
-| Pre-flight | Chrome not running / token missing | Run `bash ~/connect-gemini.sh`, retry once |
-| Pre-flight | /tmp disk < 10MB | Alert user, suggest `export TMPDIR=/var/tmp` |
-| P1 | — | Claude generates default angle-prefixed prompts |
-| P2 | 1+ platform timeout | Partial text extraction, `[WARNING: NODE_TIMEOUT_TRUNCATED]` prefix, continue |
-| P2 | 1+ platform crash/exception | Continue with remaining workers |
-| P2 | ALL 3 fail | Report to user: "All 3 expert nodes failed. Check network/proxy. Retry? (y/n)" |
-| P3 | — | Claude can still reason over partial P2 results |
-| P3.5 | PARALLEL consensus ≥2/3 → skip P4 | Early exit, majority answer returned directly |
-| P4 | DeepSeek API unreachable / 5xx | Retry with exponential backoff (3 attempts), then present P3 matrix |
-| P4 | DEEPSEEK_API_KEY not set | Present P3 matrix, note degradation |
-| P4 | confidence < 0.7 + Condorcet p>0.5 | Selective escalation: +Claude → rerun → P4 again |
-| P4 | confidence < 0.7 + Condorcet p<0.5 | No expansion: P4 Long CoT deep reasoning |
-| Escalation | Claude 免费额度耗尽 | Fall back to original 3-worker P4 result，note partial coverage |
+| 场景 | 处理 |
+|------|------|
+| DeepSeek 路由器不可用 | 自动回退为 3 Worker 并行模式 |
+| 并行模式 Worker 失败 | 替补池 Qwen→MiniMax→Doubao 1:1 递补 |
+| 串行模式当前阶段失败 | 自动跳到下一平台，继承上次成功输出 |
+| DeepSeek 裁决不可用 | 最佳努力答案，标记 `⚠️ 降级答案` |
+| Web AI 额度用尽 | 自动检测并递补下一模型 |
+| Chrome CDP 断开 | ConnectionManager 自动重连，epoch 隔离 |
 
 ---
 

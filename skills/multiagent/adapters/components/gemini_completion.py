@@ -16,9 +16,21 @@ log = logging.getLogger("adapters.gemini.completion")
 
 
 class GeminiCompletionDetector:
-    """Wait for Gemini Extended Thinking to finish, then extract response."""
+    """Wait for Gemini Extended Thinking to finish, then extract response.
 
-    THINKING_PHASE_CAP_MS = 90_000  # max wait for toolbar after stop button gone
+    P0 fix (R10): UI state machine replaces hardcoded 90s THINKING_PHASE_CAP.
+    Old code capped Extended Thinking wait at 90s regardless of caller deadline.
+    ET can take 30-300s with no DOM changes — the hard cap caused premature
+    timeout and empty responses (R1-R4 failures).
+
+    State machine:
+      SENDING   → stop button not yet visible → wait for it (15s)
+      GENERATING → stop button visible → brief phase (up to deadline)
+      THINKING  → stop hidden, no toolbar → ET in progress (respect deadline)
+      COMPLETE  → toolbar visible → extraction
+    """
+
+    THINKING_PHASE_CAP_MS = 90_000  # kept as fallback only
 
     def __init__(self, stop_selector: str, toolbar_selector: str,
                  thinking_selector: str, response_strategies: list[str],
@@ -27,87 +39,86 @@ class GeminiCompletionDetector:
         self.toolbar_sel = toolbar_selector
         self.thinking_sel = thinking_selector
         self.strategies = response_strategies
-        self._get_baseline = get_baseline  # callable → int
+        self._get_baseline = get_baseline
 
     async def wait_response(self, page, timeout_ms: int = 600_000) -> str:
-        """Extended-Thinking-aware completion detection."""
+        """UI state machine for Extended-Thinking-aware completion."""
         start = _time.time()
 
-        # Step 1: Confirm submission (stop button appears)
+        def _remaining():
+            return max(1_000, timeout_ms - int((_time.time() - start) * 1000))
+
+        # STATE 1 — SENDING: wait for stop button to confirm submission
         try:
             stop_btn = page.locator(self.stop_sel).first
             await stop_btn.wait_for(state="visible", timeout=15_000)
-            log.info("[Gemini] Stop button visible — submission confirmed")
+            log.info("[Gemini] Stop button visible — generation started")
         except Exception:
-            log.info("[Gemini] Stop button did not appear")
+            log.info("[Gemini] Stop button did not appear — may already be thinking")
 
-        # Step 2: Wait for stop button to disappear (thinking begins).
-        # Do NOT treat this as completion.
+        # STATE 2 — GENERATING→THINKING: stop button disappears when ET begins
         try:
-            remaining = max(10_000, timeout_ms - int((_time.time() - start) * 1000))
-            await stop_btn.wait_for(state="hidden", timeout=remaining)
-            log.info("[Gemini] Stop button hidden — Extended Thinking phase began")
+            await stop_btn.wait_for(state="hidden", timeout=_remaining())
+            log.info("[Gemini] Stop button hidden — Extended Thinking phase")
         except Exception:
-            log.info("[Gemini] Stop button never hidden or timed out")
+            log.info("[Gemini] Stop button still visible or timed out")
 
-        # Step 3: Wait for toolbar as definitive completion anchor.
-        # Cap at THINKING_PHASE_CAP_MS — if toolbar doesn't appear, generation
-        # is likely stuck server-side.
+        # STATE 3 — THINKING→COMPLETE: wait for toolbar using caller's deadline.
+        # P0 fix: use _remaining() (full deadline) instead of 90s hard cap.
+        # Extended Thinking can take 30-300s with zero DOM changes — the old
+        # 90s cap caused premature timeout and EMPTY_OR_TOO_SHORT responses.
         toolbar_found = False
         try:
             toolbar = page.locator(self.toolbar_sel).first
-            await toolbar.wait_for(state="visible",
-                                   timeout=self.THINKING_PHASE_CAP_MS)
+            await toolbar.wait_for(state="visible", timeout=_remaining())
             toolbar_found = True
-            log.info("[Gemini] Toolbar detected — Extended Thinking complete")
+            log.info("[Gemini] Toolbar detected — generation complete (%.0fs)",
+                     (_time.time() - start))
         except Exception:
-            log.info("[Gemini] Toolbar timeout after %.0fs — generation likely stuck",
-                     self.THINKING_PHASE_CAP_MS / 1000)
+            log.info("[Gemini] Toolbar wait exhausted — deadline reached")
 
-        # Step 3.5: If toolbar never appeared, do stability check.
-        # Must fit within remaining timeout budget (capped at 15s max to
-        # avoid asyncio.wait() cancelling other workers when we overrun).
+        # Fallback: if deadline exhausted without toolbar, try stability check
         if not toolbar_found:
-            elapsed = (_time.time() - start) * 1000
-            remaining_budget = max(5_000, timeout_ms - int(elapsed))
-            max_stability_s = min(15, remaining_budget / 1000)
-            poll_interval_s = 2.0
-            max_checks = max(2, int(max_stability_s / poll_interval_s))
-            log.info("[Gemini] Post-stuck stability check: %.0fs (%d checks)",
-                     max_stability_s, max_checks)
+            remaining_budget = _remaining()
+            if remaining_budget > 5_000:
+                max_stability_s = min(30, remaining_budget / 1000)
+                poll_interval_s = 2.0
+                max_checks = max(2, int(max_stability_s / poll_interval_s))
+                log.info("[Gemini] Stability fallback: %.0fs (%d checks)",
+                         max_stability_s, max_checks)
 
-            last_len = 0
-            stable_checks = 0
-            for _ in range(max_checks):
-                await asyncio.sleep(poll_interval_s)
+                last_len = 0
+                stable_checks = 0
+                for _ in range(max_checks):
+                    await asyncio.sleep(poll_interval_s)
 
-                if self.thinking_sel:
+                    if self.thinking_sel:
+                        try:
+                            if await page.locator(self.thinking_sel).first.is_visible():
+                                stable_checks = 0
+                                continue
+                        except Exception:
+                            pass
+
                     try:
-                        thinking_el = page.locator(self.thinking_sel).first
-                        if await thinking_el.is_visible():
+                        current = await self._extract(page)
+                        if current and abs(len(current) - last_len) < 20:
+                            stable_checks += 1
+                            if stable_checks >= 2:
+                                log.info("[Gemini] Content stabilised at %d chars",
+                                         len(current))
+                                break
+                        else:
                             stable_checks = 0
-                            continue
+                        last_len = len(current) if current else 0
                     except Exception:
-                        pass
+                        break
 
-                try:
-                    current = await self._extract(page)
-                    if current and abs(len(current) - last_len) < 20:
-                        stable_checks += 1
-                        if stable_checks >= 2:
-                            log.info("[Gemini] Content stabilised at %d chars",
-                                     len(current))
-                            break
-                    else:
-                        stable_checks = 0
-                    last_len = len(current) if current else 0
-                except Exception:
-                    break
-
-        # Step 4: Extract final response
+        # STATE 4 — COMPLETE: extract final response
         try:
             raw = await self._extract(page)
-            log.info("[Gemini] Final extraction: %d chars", len(raw))
+            log.info("[Gemini] Final extraction: %d chars (toolbar=%s)",
+                     len(raw), toolbar_found)
             return raw
         except Exception as e:
             log.warning("[Gemini] Final extract failed: %s", e)
