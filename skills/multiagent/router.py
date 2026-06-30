@@ -296,25 +296,32 @@ async def run_parallel_route(task: str, plan: RoutePlan,
     spare_iter = iter(_P2_SPARE.items())
     replacements = {}
     for failed_platform, inherited_prompt in failed_slots:
-        replaced = False
-        for spare_platform, spare_cls in spare_iter:
-            fallback_prompt = (
-                f"你正在接替失败的 {failed_platform} Worker。"
-                f"必须覆盖其原职责。\n{inherited_prompt}\n"
-                f"额外要求：1. 明确检查 {failed_platform} 最可能遗漏的内容。"
-                f"2. 独立给出证据和结论。"
-            )
-            r = await _dispatch_one(spare_platform, spare_cls, fallback_prompt,
-                                    timeout_s, keep_alive)
-            r["attempt_kind"] = "fallback"
-            r["replaces"] = failed_platform
-            all_results.append(r)
-            if _is_usable_result(r):
-                replacements[failed_platform] = spare_platform
-                replaced = True
-                break
-        if not replaced:
+        # P0 fix (R8): 1:1 slot→spare. Old inner for-loop consumed ALL
+        # remaining spares for a single failed slot, starving later slots.
+        try:
+            spare_platform, spare_cls = next(spare_iter)
+        except StopIteration:
             replacements[failed_platform] = "unfilled"
+            log.warning("[Parallel] No spares left for %s", failed_platform)
+            continue
+
+        fallback_prompt = (
+            f"你正在接替失败的 {failed_platform} Worker。"
+            f"必须覆盖其原职责。\n{inherited_prompt}\n"
+            f"额外要求：1. 明确检查 {failed_platform} 最可能遗漏的内容。"
+            f"2. 独立给出证据和结论。"
+        )
+        r = await _dispatch_one(spare_platform, spare_cls, fallback_prompt,
+                                timeout_s, keep_alive)
+        r["attempt_kind"] = "fallback"
+        r["replaces"] = failed_platform
+        all_results.append(r)
+        if _is_usable_result(r):
+            replacements[failed_platform] = spare_platform
+        else:
+            replacements[failed_platform] = "unfilled"
+            log.warning("[Parallel] fallback %s failed for %s",
+                       spare_platform, failed_platform)
 
     usable = sum(_is_usable_result(r) for r in all_results)
     return {
@@ -395,17 +402,26 @@ async def run_pipeline(task: str, *, mode: str = "auto",
     adjudication_ok = bool(adjudicated.strip())
 
     # Fallback: best effort answer from collection
+    # P0 fix (R8): clearly mark fallback answers so users know they got a
+    # degraded result, not a DeepSeek-adjudicated answer.
     if not adjudication_ok:
         usable = [r for r in collection.get("results", []) if _is_usable_result(r)]
         if usable and collection.get("mode") == "serial":
-            adjudicated = str(usable[-1].get("response", ""))
+            raw_answer = str(usable[-1].get("response", ""))
         elif usable:
-            adjudicated = str(max(usable, key=lambda r: len(r.get("response", ""))).get("response", ""))
+            raw_answer = str(max(usable, key=lambda r: len(r.get("response", ""))).get("response", ""))
+        else:
+            raw_answer = ""
+        adjudicated = (
+            "⚠️ DeepSeek API 裁决不可用，以下为降级最佳努力答案（未经裁决器验证）：\n\n"
+            + raw_answer
+        ) if raw_answer else ""
 
     return {
         "success": bool(adjudicated.strip()),
         "route": plan.to_dict(),
         "collection": collection,
         "adjudication_ok": adjudication_ok,
+        "fallback_used": not adjudication_ok,
         "final_answer": adjudicated.strip(),
     }
