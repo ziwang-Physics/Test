@@ -31,7 +31,7 @@ except ImportError:
     _HAS_HTTPX = False
 
 from common import (
-    cdp_url, setup_logging, PAGE_LOAD_WAIT_MS, SPA_WAKE_WAIT_MS,
+    cdp_url, setup_logging, Deadline, PAGE_LOAD_WAIT_MS, SPA_WAKE_WAIT_MS,
     PlatformId, ErrorKind, ErrorInfo, ErrorEnvelope, WorkerResult,
 )
 from adapters import (
@@ -580,9 +580,15 @@ async def _p2_worker(adapter, prompt: str, results: dict,
         # P1: fire immediately — no barrier wait
         await adapter.trigger_send(page)
 
+        # P0 fix (R10): shared Deadline prevents retry from getting a full
+        # second timeout. Old code gave retry fresh timeout_s, so a 300s
+        # worker could run 300s + 300s = 600s, blowing past the deadline.
+        worker_deadline = Deadline.after(timeout_s)
+
         truncated = False
         try:
-            raw = await adapter.wait_response(page, timeout_ms=timeout_s * 1000)
+            raw = await adapter.wait_response(page,
+                timeout_ms=worker_deadline.ms_remaining())
         except asyncio.TimeoutError:
             log.warning("[P2:%s] HARD TIMEOUT (%ds)", name, timeout_s)
             raw = await _extract_partial_text(page, adapter)
@@ -649,7 +655,8 @@ async def _p2_worker(adapter, prompt: str, results: dict,
                 adapter._assistant_baseline = {}
             await adapter.trigger_send(page)
             try:
-                raw = await adapter.wait_response(page, timeout_ms=timeout_s * 1000)
+                raw = await adapter.wait_response(page,
+                    timeout_ms=worker_deadline.ms_remaining())
             except asyncio.TimeoutError:
                 raw = await _extract_partial_text(page, adapter)
                 truncated = True

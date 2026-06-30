@@ -146,9 +146,21 @@ async def main():
                        help="Skip simultaneous-send barrier (workers still run concurrently)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--maturity", action="store_true")
-    parser.add_argument("--synthesize", action="store_true",
-                       help="(DEPRECATED — synthesis not yet integrated; use orchestrator)")
+    parser.add_argument("--mode", choices=["auto","parallel","serial"], default="auto")
+    parser.add_argument("--route", action="store_true",
+                       help="Use new router-based pipeline (recommended)")
     args = parser.parse_args()
+
+    # R10: delegate to new router pipeline when --route is used
+    if args.route:
+        from router import run_pipeline
+        result = await run_pipeline(
+            args.prompt, mode=args.mode, timeout_s=args.timeout)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(result.get("final_answer", ""))
+        return
 
     if args.maturity:
         print("Platform Maturity Levels:")
