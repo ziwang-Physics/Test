@@ -25,31 +25,38 @@ from .claude import ClaudeAdapter
 from .kimi import KimiAdapter
 from .qianwen import QianwenAdapter
 from .deepseek import DeepSeekAdapter
-from ._deprecated import DoubaoAdapter
+from .minimax import MiniMaxAdapter
+from .doubao import DoubaoAdapter
+
+# Backward compat: also available via ._deprecated
+from ._deprecated import DoubaoAdapter as _DoubaoDeprecated
 
 ADAPTER_REGISTRY = {
     "gemini":    GeminiAdapter,
     "chatgpt":   ChatGPTAdapter,
     "claude":    ClaudeAdapter,
     "kimi":      KimiAdapter,
-    "doubao":    DoubaoAdapter,
     "qianwen":   QianwenAdapter,
     "deepseek":  DeepSeekAdapter,
+    "minimax":   MiniMaxAdapter,
+    "doubao":    DoubaoAdapter,
 }
 
 PLATFORM_MATURITY = {
-    "gemini":    "⭐⭐⭐⭐⭐ Verified — DOM injection, extraction, Pro Extended",
-    "chatgpt":   "⭐⭐⭐⭐   Verified — works, response selector tuned",
-    "claude":    "⭐⭐⭐     Works — rate-limit sensitive on free tier",
-    "kimi":      "⭐⭐⭐     DOM selectors verified (2026-06-27 probe) — needs field test",
-    "doubao":    "🚫 DEPRECATED — removed from defaults, use --adapters doubao to opt-in",
-    "qianwen":   "⭐⭐⭐     DOM selectors verified (2026-06-27 probe) — stability improved",
-    "deepseek":  "⭐⭐⭐     DOM verified (2026-06-27) — Expert + Deep Think + Smart Search",
+    "gemini":    "active",
+    "chatgpt":   "active",
+    "claude":    "active",
+    "kimi":      "active",
+    "qianwen":   "active",
+    "deepseek":  "active",
+    "minimax":   "active-unverified",
+    "doubao":    "active-unverified",
 }
 
 __all__ = [
     "BaseAdapter",
     "GeminiAdapter", "ChatGPTAdapter", "ClaudeAdapter",
-    "KimiAdapter", "QianwenAdapter", "DeepSeekAdapter", "DoubaoAdapter",
+    "KimiAdapter", "QianwenAdapter", "DeepSeekAdapter",
+    "MiniMaxAdapter", "DoubaoAdapter",
     "ADAPTER_REGISTRY", "PLATFORM_MATURITY",
 ]

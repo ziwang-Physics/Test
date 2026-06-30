@@ -49,14 +49,17 @@ log = setup_logging("orchestrator")
 SHARED_CDP_PORT = "9222"
 P2_DEFAULT_TIMEOUT = 60
 
+# R2 fix: new architecture — Kimi as primary parallel worker.
+# P2_CLASSES = default parallel workers (Kimi + Gemini + ChatGPT).
+# _P2_SPARE = serial fallback chain and quota substitutes.
 P2_CLASSES = {
-    PlatformId.CHATGPT:  ChatGPTAdapter,
-    PlatformId.QIANWEN:  QianwenAdapter,
-    PlatformId.GEMINI:   GeminiAdapter,   # auto-retry on error: close dead tab, open fresh, re-submit
+    PlatformId.KIMI:     KimiAdapter,      # 搜索资料、文献基准
+    PlatformId.GEMINI:   GeminiAdapter,    # 多模态推理, Pro Extended Thinking
+    PlatformId.CHATGPT:  ChatGPTAdapter,   # 直接回答、工程实践
 }
 _P2_SPARE = {
-    PlatformId.KIMI:     KimiAdapter,
-    PlatformId.CLAUDE:   ClaudeAdapter,
+    PlatformId.CLAUDE:   ClaudeAdapter,    # 串行链第一替补
+    PlatformId.QIANWEN:  QianwenAdapter,   # 替补池第一替补
 }
 
 # ── Circuit Breaker (P0 fix: 5-round review consensus) ────────────────────

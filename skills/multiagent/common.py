@@ -50,12 +50,15 @@ class PlatformId:
     KIMI     = "kimi"
     CLAUDE   = "claude"
     DEEPSEEK = "deepseek"
+    MINIMAX  = "minimax"
+    DOUBAO   = "doubao"
 
-    _ALL: tuple[str, ...] = (CHATGPT, QIANWEN, GEMINI, KIMI, CLAUDE, DEEPSEEK)
+    _ALL: tuple[str, ...] = (CHATGPT, QIANWEN, GEMINI, KIMI, CLAUDE, DEEPSEEK, MINIMAX, DOUBAO)
 
     _DISPLAY_NAMES: dict[str, str] = {
         "chatgpt": "ChatGPT", "qianwen": "Qianwen", "gemini": "Gemini",
         "kimi": "Kimi", "claude": "Claude", "deepseek": "DeepSeek",
+        "minimax": "MiniMax", "doubao": "Doubao",
     }
 
     @classmethod
